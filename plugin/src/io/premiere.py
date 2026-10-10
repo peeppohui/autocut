@@ -342,7 +342,11 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     # связанный звук видеодорожек: по порядку, начиная с A1.
     # Внутренние имена помечены префиксом, иначе авто-"A2" для звука клипа
     # с V2 совпал бы с явно запрошенной дорожкой "A2" из колонки track.
-    linked_audio = {v: f"L:{v}" for v in vnames}
+    # Дорожку второго ракурса пропускаем: её клипы видео-only, без <link>,
+    # и звуковая дорожка осталась бы пустой. Premiere отказывался импортировать
+    # такой файл, а на первой звуковой дорожке ещё стоял totalExplodedTrackCount,
+    # обещающий группу из нескольких дорожек.
+    linked_audio = {v: f"L:{v}" for v in vnames if v != ALT_TRACK}
 
     # самостоятельные звуковые дорожки: после связанных, в порядке появления
     extra_audio = []
@@ -350,7 +354,8 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         if audio_only(c) and c["track"] not in extra_audio:
             extra_audio.append(c["track"])
 
-    anames = [linked_audio[v] for v in vnames] + [f"X:{n}" for n in extra_audio]
+    anames = ([linked_audio[v] for v in vnames if v in linked_audio]
+              + [f"X:{n}" for n in extra_audio])
 
     def aname_of(c):
         if audio_only(c):
