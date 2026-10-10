@@ -153,10 +153,12 @@ def build_interview(p: Dict, log) -> List[Step]:
             script(MODES / "interview.py"), "--input", wide,
             "--outdir", f"{out}/rz", "--device", p.get("device", "auto")]))
 
-    steps.append(Step("3. XML для Premiere", [
-        script(IO / "premiere.py"), "--timeline", f"{out}/rz/selects.csv",
-        "--media-dir", out, "--out", f"{out}/ryba.xml",
-        "--edl", f"{out}/ryba.edl", "--trim-rec"]))
+    args_xml = [script(IO / "premiere.py"), "--timeline", f"{out}/rz/selects.csv",
+                "--media-dir", out, "--out", f"{out}/ryba.xml",
+                "--edl", f"{out}/ryba.edl", "--trim-rec"]
+    if p.get("multicam"):
+        args_xml.append("--multicam")
+    steps.append(Step("3. XML для Premiere", args_xml))
     steps.append(Step("4. Субтитры", [
         script(IO / "srt.py"), "--selects", f"{out}/rz/selects.csv",
         "--out", f"{out}/ryba.srt"]))

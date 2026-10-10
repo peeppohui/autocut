@@ -508,7 +508,8 @@ def run_from_transcript(args) -> int:
                          "desc": f"ПЕРЕБИВКА после {o:.1f}с", "path": b["path"]})
     with open(out / "selects.csv", "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["file", "plan", "hero", "duration", "in", "out",
-                                          "desc", "path", "audio"])
+                                          "desc", "path", "audio", "alt", "alt_path"],
+                           restval="", extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     with open(out / "speech.json", "w", encoding="utf-8") as f:
@@ -612,6 +613,10 @@ def run_multicam(args) -> int:
         # короткие куски — под вопросом: программа их оставляет, но метит
         return len(text.split()) <= 2
 
+    def alt_vid(sp):
+        """Второй ракурс для мультикама: та камера, которая не говорит."""
+        return (gcam, args.guest_plan) if sp == "ведущий" else (wide, args.wide_plan)
+
     rows = []
     bi = 0
     susp_list = []
@@ -625,10 +630,12 @@ def run_multicam(args) -> int:
         if is_ambig(i, o):
             desc = "[~] " + desc
             susp_list.append((i, o, sp, text + " (микрофоны слышат одинаково)"))
+        avf, _ = alt_vid(sp)
         rows.append({"file": vf.name, "plan": vplan, "hero": vhero,
                      "duration": round(o - i, 2), "in": round(i, 2), "out": round(o, 2),
                      "desc": desc, "path": str(vf.absolute()),
-                     "audio": str(gw.absolute()) if sp == "гость" else str(hw.absolute())})
+                     "audio": str(gw.absolute()) if sp == "гость" else str(hw.absolute()),
+                     "alt": avf.name, "alt_path": str(avf.absolute())})
         if k < len(chunks) - 1 and broll:
             b = broll[bi % len(broll)]
             bi += 1
@@ -637,7 +644,8 @@ def run_multicam(args) -> int:
                          "desc": f"ПЕРЕБИВКА после {o:.1f}с", "path": b["path"]})
     with open(out / "selects.csv", "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["file", "plan", "hero", "duration", "in", "out",
-                                          "desc", "path", "audio"])
+                                          "desc", "path", "audio", "alt", "alt_path"],
+                           restval="", extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
 

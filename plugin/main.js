@@ -86,6 +86,8 @@ const FIELDS = {
       hint: "Сводит камеры и микрофоны по звуку. Без хлопка работает по речи." },
     { id: "conform", label: "Привести к", type: "text", def: "",
       hint: "Например 1920x1080@25. Пусто — гостя подстроит автоматически." },
+    { id: "multicam", label: "Мультикам", type: "check", def: true,
+      hint: "Оба ракурса в одном клипе, ракурс переключается прямо в Premiere." },
     { id: "out_dir", label: "Результат", type: "dir", required: true },
   ],
   digest: [
