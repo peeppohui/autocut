@@ -34,6 +34,32 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bootstrap  # noqa: F401  — регистрирует src/modes в sys.path (нужен autocut)
+import settings
+
+# Параметры таймкода секвенции. ВНИМАНИЕ: drop_frame требует дробного
+# fps (29.97/59.94). При целом fps и drop_frame=true таймкод врёт, поэтому
+# такую комбинацию отвергаем на старте, а не пишем молча кривой XML.
+PROJECT_FPS = settings.get("project.fps", 25)
+DROP_FRAME = bool(settings.get("project.drop_frame", False))
+EXPORT_FPS = int(settings.get("export.fps", PROJECT_FPS))
+EXPORT_WIDTH = int(settings.get("export.width", 1920))
+EXPORT_HEIGHT = int(settings.get("export.height", 1080))
+AUDIO_DEPTH = int(settings.get("export.audio_depth", 16))
+AUDIO_RATE = int(settings.get("export.audio_sample_rate", 48000))
+AUDIO_CHANNELS = int(settings.get("export.audio_channels", 2))
+COLOR_DEPTH = int(settings.get("export.color_depth", 24))
+DISPLAY_FORMAT = "DF" if DROP_FRAME else "NDF"
+NTSC_FLAG = "TRUE" if DROP_FRAME else "FALSE"
+
+
+def check_timebase() -> None:
+    """Отвергает drop-frame на целом FPS: так таймкод 00:59:59:29 читается
+    неверно и Premiere импортирует секвенцию со сдвигом."""
+    if DROP_FRAME and EXPORT_FPS not in (30, 60):
+        raise ValueError(
+            f"drop_frame=true требует fps 30 или 60 (дробные 29.97/59.94), "
+            f"а в настройках fps={EXPORT_FPS}. Исправь project.fps "
+            f"или project.drop_frame в config/settings.json")
 
 media_dir_global = Path(".")
 try:
@@ -154,7 +180,7 @@ def _video_file_el(fid: str, c: Dict, orig: int, fps: int, width: int, height: i
     fmc = f.find("timecode")
     ET.SubElement(fmc, "string").text = "00:00:00:00"
     ET.SubElement(fmc, "frame").text = "0"
-    ET.SubElement(fmc, "displayformat").text = "NDF"
+    ET.SubElement(fmc, "displayformat").text = DISPLAY_FORMAT
     fmedia = ET.SubElement(f, "media")
     fv = ET.SubElement(fmedia, "video")
     fsc = ET.SubElement(fv, "samplecharacteristics")
@@ -164,12 +190,12 @@ def _video_file_el(fid: str, c: Dict, orig: int, fps: int, width: int, height: i
     ET.SubElement(fsc, "anamorphic").text = "FALSE"
     ET.SubElement(fsc, "pixelaspectratio").text = "square"
     ET.SubElement(fsc, "fielddominance").text = "none"
-    ET.SubElement(fsc, "colordepth").text = "24"
+    ET.SubElement(fsc, "colordepth").text = str(COLOR_DEPTH)
     fa = ET.SubElement(fmedia, "audio")
     fasc = ET.SubElement(fa, "samplecharacteristics")
-    ET.SubElement(fasc, "depth").text = "16"
-    ET.SubElement(fasc, "samplerate").text = "48000"
-    ET.SubElement(fa, "channelcount").text = "2"
+    ET.SubElement(fasc, "depth").text = str(AUDIO_DEPTH)
+    ET.SubElement(fasc, "samplerate").text = str(AUDIO_RATE)
+    ET.SubElement(fa, "channelcount").text = str(AUDIO_CHANNELS)
     return f
 
 
@@ -186,19 +212,24 @@ def _audio_file_el(fid: str, c: Dict, orig: int, fps: int) -> ET.Element:
     fmc = f.find("timecode")
     ET.SubElement(fmc, "string").text = "00:00:00:00"
     ET.SubElement(fmc, "frame").text = "0"
-    ET.SubElement(fmc, "displayformat").text = "NDF"
+    ET.SubElement(fmc, "displayformat").text = DISPLAY_FORMAT
     fmedia = ET.SubElement(f, "media")
     fa = ET.SubElement(fmedia, "audio")
     fasc = ET.SubElement(fa, "samplecharacteristics")
-    ET.SubElement(fasc, "depth").text = "16"
-    ET.SubElement(fasc, "samplerate").text = "48000"
-    ET.SubElement(fa, "channelcount").text = "2"
+    ET.SubElement(fasc, "depth").text = str(AUDIO_DEPTH)
+    ET.SubElement(fasc, "samplerate").text = str(AUDIO_RATE)
+    ET.SubElement(fa, "channelcount").text = str(AUDIO_CHANNELS)
     return f
 
 
-def build_fcp7(clips: List[Dict], fps: int = 25, width: int = 1920, height: int = 1080,
-               seq_name: str = "AutoCut", trim_rec: bool = False,
+def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
+               height: int = None,
+               seq_name: str = None, trim_rec: bool = False,
                audios: Optional[List[str]] = None) -> ET.Element:
+    fps = EXPORT_FPS if fps is None else fps
+    width = EXPORT_WIDTH if width is None else width
+    height = EXPORT_HEIGHT if height is None else height
+    seq_name = settings.get("project.sequence_name", "AutoCut") if seq_name is None else seq_name
     xmeml = ET.Element("xmeml", version="5")
     seq = ET.SubElement(xmeml, "sequence", id="sequence-1", name=seq_name)
     ET.SubElement(seq, "name").text = seq_name
@@ -209,12 +240,12 @@ def build_fcp7(clips: List[Dict], fps: int = 25, width: int = 1920, height: int 
     ET.SubElement(seq, "duration").text = str(total)
     rate = ET.SubElement(seq, "rate")
     ET.SubElement(rate, "timebase").text = str(fps)
-    ET.SubElement(rate, "ntsc").text = "FALSE"
+    ET.SubElement(rate, "ntsc").text = NTSC_FLAG
     ET.SubElement(seq, "timecode").append(_rate_el(fps))
     tc_el = seq.find("timecode")
     ET.SubElement(tc_el, "string").text = "00:00:00:00"
     ET.SubElement(tc_el, "frame").text = "0"
-    ET.SubElement(tc_el, "displayformat").text = "NDF"
+    ET.SubElement(tc_el, "displayformat").text = DISPLAY_FORMAT
 
     media = ET.SubElement(seq, "media")
 
@@ -228,7 +259,7 @@ def build_fcp7(clips: List[Dict], fps: int = 25, width: int = 1920, height: int 
     ET.SubElement(sc, "anamorphic").text = "FALSE"
     ET.SubElement(sc, "pixelaspectratio").text = "square"
     ET.SubElement(sc, "fielddominance").text = "none"
-    ET.SubElement(sc, "colordepth").text = "24"
+    ET.SubElement(sc, "colordepth").text = str(COLOR_DEPTH)
 
     vtrack = ET.SubElement(video, "track")
     ET.SubElement(vtrack, "enabled").text = "TRUE"
@@ -238,8 +269,8 @@ def build_fcp7(clips: List[Dict], fps: int = 25, width: int = 1920, height: int 
     audio = ET.SubElement(media, "audio")
     afmt = ET.SubElement(audio, "format")
     asc = ET.SubElement(afmt, "samplecharacteristics")
-    ET.SubElement(asc, "depth").text = "16"
-    ET.SubElement(asc, "samplerate").text = "48000"
+    ET.SubElement(asc, "depth").text = str(AUDIO_DEPTH)
+    ET.SubElement(asc, "samplerate").text = str(AUDIO_RATE)
     atrack = ET.SubElement(audio, "track", currentExplodedTrackIndex="0", totalExplodedTrackCount="1")
     ET.SubElement(atrack, "enabled").text = "TRUE"
     ET.SubElement(atrack, "locked").text = "FALSE"
@@ -338,7 +369,7 @@ def build_fcp7(clips: List[Dict], fps: int = 25, width: int = 1920, height: int 
 def _rate_el(fps: int) -> ET.Element:
     r = ET.Element("rate")
     ET.SubElement(r, "timebase").text = str(fps)
-    ET.SubElement(r, "ntsc").text = "FALSE"
+    ET.SubElement(r, "ntsc").text = NTSC_FLAG
     return r
 
 
@@ -372,7 +403,9 @@ def write_pretty_xml(root: ET.Element, path: Path):
     path.write_bytes(pretty)
 
 
-def write_edl(clips: List[Dict], path: Path, fps: int = 25, trim_rec: bool = False):
+def write_edl(clips: List[Dict], path: Path, fps: int = None,
+              trim_rec: bool = False):
+    fps = EXPORT_FPS if fps is None else fps
     lines = [f"TITLE: {path.stem}", f"FCM: NON-DROP FRAME", ""]
     rec = 0
     for i, c in enumerate(clips, 1):
@@ -393,10 +426,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="AutoCut Premiere — CSV -> XML/EDL для Premiere Pro")
     ap.add_argument("--timeline", required=True, help="CSV таймлайна (из autocut --out)")
     ap.add_argument("--media-dir", default=".", help="папка с исходниками (если в CSV нет path)")
-    ap.add_argument("--fps", type=int, default=25)
-    ap.add_argument("--width", type=int, default=1920)
-    ap.add_argument("--height", type=int, default=1080)
-    ap.add_argument("--name", default="AutoCut", help="имя секвенции")
+    ap.add_argument("--fps", type=int, default=EXPORT_FPS,
+                    help="кадров в секунду секвенции")
+    ap.add_argument("--width", type=int, default=EXPORT_WIDTH)
+    ap.add_argument("--height", type=int, default=EXPORT_HEIGHT)
+    ap.add_argument("--name", default=settings.get("project.sequence_name", "AutoCut"),
+                    help="имя секвенции")
     ap.add_argument("--out", default="premiere.xml", help="выходной XML")
     ap.add_argument("--edl", default="premiere.edl", help="выходной EDL (пусто = не писать)")
     ap.add_argument("--trim-rec", action="store_true",
@@ -406,6 +441,12 @@ def main(argv=None) -> int:
     ap.add_argument("--audio", nargs="*", default=[],
                     help="целые аудиодорожки (микрофоны): --audio гость.wav ведущий.wav")
     args = ap.parse_args(argv)
+
+    try:
+        check_timebase()
+    except ValueError as e:
+        print(str(e))
+        return 2
 
     tl = Path(args.timeline)
     if not tl.is_file():
