@@ -354,13 +354,28 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         if audio_only(c) and c["track"] not in extra_audio:
             extra_audio.append(c["track"])
 
-    anames = ([linked_audio[v] for v in vnames if v in linked_audio]
-              + [f"X:{n}" for n in extra_audio])
+    # Звуковая дорожка на каждый источник, а не одна на все видеоклипы:
+    # с двумя микрофонами общая дорожка смешивала ведущего и гостя, и в
+    # постпродакшне их уже не развести. Теперь у каждого микрофона своя
+    # дорожка, и реплика лежит там, где именно этот микрофон звучит.
+    anames = []
+    mic_of = {}
+    for c in clips:
+        if audio_only(c):
+            continue
+        src = c.get("audio")
+        name = f"M:{Path(src).name}" if src else linked_audio[vname_of(c)]
+        if name not in anames:
+            anames.append(name)
+        mic_of[id(c)] = name
+    anames += [f"X:{n}" for n in extra_audio]
+    # в <link> индекс дорожки считается с единицы и в порядке объявления
+    aindex = {name: k + 1 for k, name in enumerate(anames)}
 
     def aname_of(c):
         if audio_only(c):
             return f"X:{c['track']}"
-        return linked_audio[vname_of(c)]
+        return mic_of[id(c)]
 
     vtracks = {}
     for name in vnames:
@@ -377,13 +392,11 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     ET.SubElement(asc, "samplerate").text = str(AUDIO_RATE)
 
     atracks = {}
-    for k, name in enumerate(anames):
-        if k == 0:
-            tr = ET.SubElement(audio, "track",
-                               currentExplodedTrackIndex="0",
-                               totalExplodedTrackCount=str(len(anames)))
-        else:
-            tr = ET.SubElement(audio, "track")
+    for name in anames:
+        # currentExplodedTrackIndex/totalExplodedTrackCount не ставим:
+        # они помечают разорванную стереопару, а у нас независимые дорожки
+        # микрофонов. Premiere на такой файл отказывался импортировать.
+        tr = ET.SubElement(audio, "track")
         ET.SubElement(tr, "enabled").text = "TRUE"
         ET.SubElement(tr, "locked").text = "FALSE"
         atracks[name] = tr
@@ -522,7 +535,8 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             link2 = ET.SubElement(ai, "link")
             ET.SubElement(link2, "linkclipref").text = f"clipitem-video-{i}"
             ET.SubElement(link2, "mediatype").text = "audio"
-            ET.SubElement(link2, "trackindex").text = "1"
+            # индекс ЗВУКОВОЙ дорожки: у раздельных микрофонов он не всегда 1
+            ET.SubElement(link2, "trackindex").text = str(aindex[aname_of(c)])
             ET.SubElement(link2, "clipindex").text = "1"
 
         t = end
@@ -673,6 +687,17 @@ def main(argv=None) -> int:
         return 3
     write_pretty_xml(root, Path(args.out))
     print(f"XML сохранён: {args.out} ({len(clips)} клипов, fps {args.fps}). Импорт: Premiere > File > Import.")
+    atracks = root.findall(".//audio/track")
+    if len(atracks) > 1:
+        print("Звуковые дорожки:")
+        for k, tr in enumerate(atracks, 1):
+            names = []
+            for ci in tr.findall("clipitem"):
+                n = ci.findtext("name")
+                if n and n not in names:
+                    names.append(n)
+            print(f"  A{k}: {', '.join(names) if names else '— пустая'} "
+                  f"({len(tr.findall('clipitem'))} клипов)")
     if args.edl:
         write_edl(clips, Path(args.edl), fps=args.fps, trim_rec=args.trim_rec)
         print(f"EDL сохранён: {args.edl} (запасной вариант).")

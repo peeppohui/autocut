@@ -164,6 +164,30 @@ with tempfile.TemporaryDirectory() as td:
     ok("второй ракурс тоже ссылается на файл",
        all(c.find("file") is not None for c in t2))
 
+    # =========================================================
+    # Раздельные микрофоны: каждому источнику звука своя дорожка.
+    # Раньше все клипы делили одну A1, и ведущий с гостем в постпродакшне
+    # были неразделимы.
+    # =========================================================
+    at = st.findall(".//audio/track")
+    ok("микрофоны на разных дорожках", len(at) == 2, str(len(at)))
+    got = [sorted({c.findtext("name") for c in tr.findall("clipitem")})
+           for tr in at]
+    ok("на каждой дорожке свой микрофон",
+       got == [["_guest.wav"], ["_host.wav"]], str(got))
+    # индекс дорожки в <link> обязан совпадать с дорожкой самого клипа
+    wrong = []
+    for k, tr in enumerate(at, 1):
+        for c in tr.findall("clipitem"):
+            for lk in c.findall("link"):
+                if lk.findtext("mediatype") == "audio" \
+                        and int(lk.findtext("trackindex")) != k:
+                    wrong.append((c.get("id"), k))
+    ok("trackindex в ссылке совпадает с дорожкой", not wrong, str(wrong[:4]))
+    ok("на дорожках микрофонов нет totalExplodedTrackCount",
+       all("totalExplodedTrackCount" not in tr.attrib for tr in at),
+       str([tr.attrib for tr in at]))
+
 print()
 if fail:
     print(f"MULTICAM FAIL ({len(fail)}): {fail}")
