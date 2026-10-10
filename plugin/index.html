@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>AutoCut</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="head">
+      <h1>AutoCut</h1>
+      <span class="ver" id="ver"></span>
+    </header>
+
+    <div class="modes">
+      <button class="mode" data-mode="interview">Интервью<br /><small>2 камеры</small></button>
+      <button class="mode" data-mode="digest">Дайджест<br /><small>1–3 мин</small></button>
+      <button class="mode" data-mode="news" data-soon="1">Сюжет<br /><small>1.5–3 мин</small></button>
+    </div>
+
+    <!-- параметры режима -->
+    <section id="params" class="params"></section>
+
+    <div class="actions">
+      <button id="run" class="primary">Собрать рыбу</button>
+      <button id="cancel" class="ghost" disabled>Снять ожидание</button>
+    </div>
+
+    <div class="status" id="status">Выбери режим и заполни пути.</div>
+
+    <div class="logwrap">
+      <div class="loghead">
+        <span>Журнал</span>
+        <button id="clearlog" class="tiny">очистить</button>
+      </div>
+      <pre id="log" class="log"></pre>
+    </div>
+
+    <div class="artifacts" id="artifacts"></div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

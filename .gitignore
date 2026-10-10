@@ -27,6 +27,10 @@ _vk/
 # Рабочие прогоны: срезы исходников, синхроны, рыба
 _work/
 
+# Задания и результаты панели UXP (создаются в plugin\ при нажатии кнопки)
+plugin/autocut_job.json
+plugin/autocut_result.json
+
 # Артефакты пайплайна — перегенерируются запуском
 digest_out/
 interview_out/
