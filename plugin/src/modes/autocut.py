@@ -32,6 +32,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
+import settings
+
 try:
     # чтобы русский текст не падал на Windows-консоли (cp1251)
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -162,22 +167,28 @@ def score_joint(a: Clip, b: Clip) -> Joint:
                  f"Допустимо только как адресный переход (дальний->действие) или акцент. Лучше идти ступенями.")
 
 
-# Рекомендуемые длительности для дайджеста (сек)
-REC_DURATION = {
-    "деталь": (1.5, 3.0),
-    "крупный": (2.0, 4.0),
-    "средний1": (2.5, 5.0),
-    "средний2": (3.0, 6.0),
-    "общий": (4.0, 8.0),
-    "дальний": (4.0, 8.0),
+# Рекомендуемые длительности для дайджеста (сек) — из config/settings.json
+REC_DURATION: Dict[str, Tuple[float, float]] = {
+    plan: (float(lo), float(hi))
+    for plan, (lo, hi) in settings.get("digest.rec_duration_sec", {}).items()
 }
+
+# Запас сверх верхней границы, прежде чем ругаться на длительность
+DURATION_TOLERANCE = float(settings.get("digest.duration_over_tolerance_sec", 2.0))
+
+# Сколько одинаковых планов подряд — уже монотонно и пора бить перебивкой
+MAX_SAME_PLAN_RUN = int(settings.get("digest.max_same_plan_run", 3))
+
+# Порядок перебора всегда детерминирован: один и тот же CSV даёт одну и ту же рыбу
+ORDER_SEED = int(settings.get("digest.order_seed", 42))
+TWO_OPT_ITERATIONS = int(settings.get("digest.two_opt_iterations", 2000))
 
 
 def check_duration(c: Clip) -> Optional[str]:
     lo, hi = REC_DURATION[c.plan]
     if c.duration < lo - 0.01:
         return f"«{c.file}» ({c.plan}, {c.duration}с): коротковат — {c.plan} обычно держат {lo}–{hi}с, зритель не успеет считать."
-    if c.duration > hi + 2.0:  # +2 допуск, чтобы не ворчать
+    if c.duration > hi + DURATION_TOLERANCE:  # запас, чтобы не ворчать
         return f"«{c.file}» ({c.plan}, {c.duration}с): затянут — {c.plan} обычно {lo}–{hi}с. Проверьте ритм."
     return None
 
@@ -207,7 +218,7 @@ def validate_sequence(clips: List[Clip], mode: str = "digest") -> Dict:
     for i in range(1, len(clips)):
         if clips[i].plan == clips[i-1].plan and clips[i].hero == clips[i-1].hero:
             run += 1
-            if run >= 3:
+            if run >= MAX_SAME_PLAN_RUN:
                 problems.append(f"Кадры {i}–{i+2}: три одинаковых «{clips[i].plan}» подряд на герое «{clips[i].hero}» — монотонно, разбейте перебивкой.")
         else:
             run = 1
@@ -258,11 +269,11 @@ def total_score(order: List[Clip]) -> float:
     return s / (len(order) - 1)
 
 
-def suggest_order(clips: List[Clip], mode: str = "digest", seed: int = 42) -> List[Clip]:
+def suggest_order(clips: List[Clip], mode: str = "digest", seed: int = None) -> List[Clip]:
     """Ищет порядок с максимальным комфортом склеек. Не меняет сами клипы, только порядок."""
     if len(clips) <= 1:
         return list(clips)
-    rnd = random.Random(seed)
+    rnd = random.Random(ORDER_SEED if seed is None else seed)
 
     # Маленький набор — точный перебор
     if len(clips) <= 8:
@@ -295,7 +306,7 @@ def suggest_order(clips: List[Clip], mode: str = "digest", seed: int = 42) -> Li
 
     # 2-opt hill climbing
     best_s = total_score(order)
-    for _ in range(2000):
+    for _ in range(TWO_OPT_ITERATIONS):
         i, j = sorted(rnd.sample(range(len(order)), 2))
         cand = order[:i] + list(reversed(order[i:j+1])) + order[j+1:]
         if mode == "digest" and any(c.plan in ("общий", "дальний") for c in clips):
@@ -463,8 +474,11 @@ def main(argv=None):
     ap.add_argument("--demo", choices=["digest", "interview"], help="запустить на встроенном примере")
     ap.add_argument("--out", help="сохранить таймлайн в CSV")
     ap.add_argument("--target-sec", type=float, default=0,
-                    help="шаблон дайджеста: ужать набор под хронометраж (напр. 60)")
+                    help="шаблон дайджеста: ужать набор под хронометраж (напр. 60). "
+                         "0 = не ужимать. Умолчание намеренно 0, а не из конфига: "
+                         "иначе запуск без флага молча выкинул бы куски")
     ap.add_argument("--finale-wide", action="store_true",
+                    default=bool(settings.get("digest.digest_finale_wide", True)),
                     help="шаблон дайджеста: финал обязательно общим/дальним")
     args = ap.parse_args(argv)
 

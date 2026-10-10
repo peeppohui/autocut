@@ -32,9 +32,32 @@ def load(path: Path | None = None, *, refresh: bool = False) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Ожидался JSON-объект в корне {target}")
 
+    data = _normalize(data)
+
     if path is None:
         _cache = data
     return data
+
+
+def _is_num_pair(value: list) -> bool:
+    return (len(value) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    for v in value))
+
+
+def _normalize(node: Any) -> Any:
+    """JSON не умеет кортежи: [4.0, 8.0] читается как список, а код ждёт tuple.
+
+    Приводим списки из двух чисел к кортежам — тогда значения из settings.json
+    можно подставлять вместо констант без смены типа, и сравнения в тестах
+    проходят без приведения.
+    """
+    if isinstance(node, dict):
+        return {k: _normalize(v) for k, v in node.items()}
+    if isinstance(node, list):
+        items = [_normalize(v) for v in node]
+        return tuple(items) if _is_num_pair(items) else items
+    return node
 
 
 def section(name: str, *, path: Path | None = None) -> Dict[str, Any]:
