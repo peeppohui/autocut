@@ -97,7 +97,11 @@ const FIELDS = {
       options: ["auto", "cpu", "cuda"] },
     { id: "out_dir", label: "Результат", type: "dir", required: true },
   ],
-  news: [],
+  news: [
+    { id: "spec", label: "Spec JSON", type: "file", required: true,
+      hint: "Описание материала: синхроны, перебивки, закадр, титры." },
+    { id: "out_dir", label: "Результат", type: "dir", required: true },
+  ],
 };
 
 function values() {
@@ -219,9 +223,8 @@ async function run() {
     setStatus("Заполни: " + missing.join(", "), "err");
     return;
   }
-  if (state.mode === "news") {
-    setStatus("Режим «Сюжет» ещё не собран (этап M5).", "warn");
-    return;
+if (state.mode === "news") {
+    setStatus("Режим «Сюжет» в этой сборке ещё не готов.", "warn");
   }
 
   const outDir = String(vals.out_dir || "").replace(/[\\/]+$/, "");

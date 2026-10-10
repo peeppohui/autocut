@@ -164,9 +164,24 @@ def build_interview(p: Dict, log) -> List[Step]:
 
 
 def build_news(p: Dict, log) -> List[Step]:
-    raise NotImplementedError(
-        "Режим «Сюжет по мероприятию» ещё не собран (этап M5). "
-        "Пока пользуйся вкладкой «Интервью» или «Дайджест».")
+    out = p["out_dir"]
+    spec = p.get("spec")
+    if not spec:
+        raise ValueError("Нужен файл spec (JSON) с описанием материала сюжета")
+    spec_path = Path(spec)
+    if not spec_path.is_file():
+        raise ValueError(f"Не найден spec: {spec_path}")
+    return [Step("1. Раскладываю сюжет", [
+        script(MODES / "news_package.py"), "--spec", str(spec_path),
+        "--outdir", f"{out}/rz"]),
+        Step("2. XML для Premiere", [
+            script(IO / "premiere.py"), "--timeline", f"{out}/rz/selects.csv",
+            "--media-dir", out, "--out", f"{out}/ryba.xml",
+            "--edl", f"{out}/ryba.edl", "--trim-rec"]),
+        Step("3. Субтитры", [
+            script(IO / "srt.py"), "--selects", f"{out}/rz/selects.csv",
+            "--out", f"{out}/ryba.srt"]),
+    ]
 
 
 BUILDERS = {"digest": build_digest, "interview": build_interview, "news": build_news}
@@ -198,6 +213,10 @@ def validate(job: Dict) -> None:
         if has_mic and not p.get("sync"):
             log("  ВНИМАНИЕ: микрофоны указаны без синхронизации — "
                 "таймкоды не сойдутся. Включи синхронизацию.")
+    if mode == "news":
+        if not p.get("spec"):
+            raise ValueError("Для сюжета нужен файл spec (JSON) — описание "
+                             "синхронов, перебивок, закадра и титров")
 
 
 def collect_artifacts(out_dir: str) -> List[str]:

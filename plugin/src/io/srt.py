@@ -36,6 +36,13 @@ import settings
 FLAG_RX = re.compile(r"^\s*[\[~?\]]+\s*")
 SPEAKER_RX = re.compile(r"^\s*(ГОСТЬ|ВЕДУЩИЙ|ГOST|HOST)\s*:\s*", re.IGNORECASE)
 
+# Служебные подписи таймлайна: попадают в desc, но не являются речью.
+# В субтитры им нельзя.
+SERVICE_LABELS = {
+    "закадр", "перебивка", "vo", "broll", "перебивки", "закадры",
+    "стендап", "лид", "суть", "детали",
+}
+
 
 def fmt_time(seconds: float) -> str:
     """Секунды -> HH:MM:SS,mmm. Отрицательное и нечисловое значение даёт 00:00:00,000."""
@@ -62,8 +69,7 @@ def clean_text(text: str, drop_speaker: bool = True) -> str:
 def build_srt(segments: List[Dict], *, drop_speaker: bool = True,
               min_len: float = 0.2) -> str:
     """segments: [{start, end, text}] в секундах. Возвращает текст SRT."""
-    out: List[str] = []
-    n = 0
+    blocks: List[Dict] = []
     for seg in segments:
         try:
             start = float(seg["start"])
@@ -77,10 +83,20 @@ def build_srt(segments: List[Dict], *, drop_speaker: bool = True,
             start, end = end, start
         if end - start < min_len:
             continue
-        n += 1
-        out.append(str(n))
-        out.append(f"{fmt_time(start)} --> {fmt_time(end)}")
-        out.append(text)
+        # Планировщик может разрезать одну реплику на куски, чтобы влезть
+        # в хронометраж блока. В субтитрах такая реплика должна быть одна,
+        # иначе фраза повторится три раза подряд.
+        if blocks and blocks[-1]["text"] == text and \
+                abs(start - blocks[-1]["end"]) < 0.05:
+            blocks[-1]["end"] = end
+            continue
+        blocks.append({"start": start, "end": end, "text": text})
+
+    out: List[str] = []
+    for i, b in enumerate(blocks, 1):
+        out.append(str(i))
+        out.append(f"{fmt_time(b['start'])} --> {fmt_time(b['end'])}")
+        out.append(b["text"])
         out.append("")
     return "\n".join(out)
 
@@ -88,30 +104,50 @@ def build_srt(segments: List[Dict], *, drop_speaker: bool = True,
 def segments_from_selects(path: Path, *, drop_speaker: bool = True) -> List[Dict]:
     """Достаёт куски с текстом из selects.csv (то, что делает interview.py).
 
-    Строки-перебивки без текста пропускаются: субтитровать нечего.
+    Время берём НЕ из колонок in/out. Там лежит время внутри исходного
+    файла, а Premiere сжимает паузы и собирает монтаж встык. Позиция
+    субтитра в секвенции равна сумме длительностей предыдущих кусков -
+    именно так premiere.py раскладывает таймлайн.
+
+    Текст берём из колонки text, если она есть (news_package кладёт туда
+    реальные слова речи), иначе из desc. Служебные подписи вроде
+    «закадр» или «перебивка» в субтитры не идут.
     """
     rows: List[Dict] = []
     with open(path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
-            desc = row.get("desc") or ""
-            if not desc:
+            row = {(k or "").strip().lower(): (v or "").strip()
+                   for k, v in row.items()}
+            if not row.get("file"):
+                continue
+            raw = row.get("text") or row.get("desc") or ""
+            if not raw:
                 continue
             try:
-                start = float(row.get("in") or "")
-                end = float(row.get("out") or "")
+                dur = float(row.get("duration") or "")
             except ValueError:
                 try:
-                    start = float(row.get("duration") or "")
+                    dur = float(row.get("out") or "") - float(row.get("in") or "")
                 except ValueError:
                     continue
-                end = start
-            text = clean_text(desc, drop_speaker)
-            if not text:
+            if dur <= 0:
                 continue
-            rows.append({"start": start, "end": end, "text": text})
-    return rows
+            rows.append({"dur": dur, "raw": raw, "has_text": bool(row.get("text"))})
+
+    out: List[Dict] = []
+    cursor = 0.0
+    for r in rows:
+        start = cursor
+        cursor += r["dur"]
+        text = clean_text(r["raw"], drop_speaker)
+        if not text:
+            continue
+        # если это служебная подпись без речи, субтитровать нечего
+        if not r["has_text"] and text.lower() in SERVICE_LABELS:
+            continue
+        out.append({"start": start, "end": cursor, "text": text})
+    return out
 
 
 def segments_from_json(path: Path) -> List[Dict]:
