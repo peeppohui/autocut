@@ -49,6 +49,9 @@ AUDIO_RATE = int(settings.get("export.audio_sample_rate", 48000))
 AUDIO_CHANNELS = int(settings.get("export.audio_channels", 2))
 COLOR_DEPTH = int(settings.get("export.color_depth", 24))
 DISPLAY_FORMAT = "DF" if DROP_FRAME else "NDF"
+# Допустимые дорожки в колонке track таймлайна.
+VIDEO_TRACKS = {"V1", "V2", "V3", "V4"}
+AUDIO_TRACKS = {"A2", "A3", "A4"}
 NTSC_FLAG = "TRUE" if DROP_FRAME else "FALSE"
 
 
@@ -101,6 +104,9 @@ def load_timeline(path: Path) -> List[Dict]:
                 # звук для A1 отдельно (микрофон говорящего из interview.py);
                 # пусто = звук из видеофайла
                 "audio": (row.get("audio") or "").strip(),
+                # дорожка: V1/V2/... для видео со связанным звуком,
+                # A2/A3/... для звука без картинки (подложка, закадр)
+                "track": (row.get("track") or "").strip().upper(),
             })
     return rows
 
@@ -225,11 +231,14 @@ def _audio_file_el(fid: str, c: Dict, orig: int, fps: int) -> ET.Element:
 def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
                height: int = None,
                seq_name: str = None, trim_rec: bool = False,
-               audios: Optional[List[str]] = None) -> ET.Element:
+               audios: Optional[List[str]] = None,
+               markers: bool = None) -> ET.Element:
     fps = EXPORT_FPS if fps is None else fps
     width = EXPORT_WIDTH if width is None else width
     height = EXPORT_HEIGHT if height is None else height
     seq_name = settings.get("project.sequence_name", "AutoCut") if seq_name is None else seq_name
+    if markers is None:
+        markers = bool(settings.get("export.markers", True))
     xmeml = ET.Element("xmeml", version="5")
     seq = ET.SubElement(xmeml, "sequence", id="sequence-1", name=seq_name)
     ET.SubElement(seq, "name").text = seq_name
@@ -261,9 +270,52 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     ET.SubElement(sc, "fielddominance").text = "none"
     ET.SubElement(sc, "colordepth").text = str(COLOR_DEPTH)
 
-    vtrack = ET.SubElement(video, "track")
-    ET.SubElement(vtrack, "enabled").text = "TRUE"
-    ET.SubElement(vtrack, "locked").text = "FALSE"
+    # ---- распределение по дорожкам ----
+    # Без колонки track всё идёт на V1 со связанным звуком на A1 —
+    # это поведение по умолчанию, одинаковое с прежней версией.
+    #
+    # Связанный звук и самостоятельные звуковые дорожки разведены в разные
+    # пространства имён: звук клипа с V2 сам по себе занимает первую
+    # дорожку, а колонка A2 в таймлайне означает "вторая дорожка без
+    # картинки" и встаёт после связанных. Иначе подложка на A2 делила бы
+    # дорожку со звуком клипа с V2.
+    def audio_only(c):
+        return c.get("track") in AUDIO_TRACKS
+
+    def vname_of(c):
+        return c.get("track") if c.get("track") in VIDEO_TRACKS else "V1"
+
+    vnames = []
+    for c in clips:
+        if not audio_only(c) and vname_of(c) not in vnames:
+            vnames.append(vname_of(c))
+    if not vnames:
+        vnames = ["V1"]
+
+    # связанный звук видеодорожек: по порядку, начиная с A1.
+    # Внутренние имена помечены префиксом, иначе авто-"A2" для звука клипа
+    # с V2 совпал бы с явно запрошенной дорожкой "A2" из колонки track.
+    linked_audio = {v: f"L:{v}" for v in vnames}
+
+    # самостоятельные звуковые дорожки: после связанных, в порядке появления
+    extra_audio = []
+    for c in clips:
+        if audio_only(c) and c["track"] not in extra_audio:
+            extra_audio.append(c["track"])
+
+    anames = [linked_audio[v] for v in vnames] + [f"X:{n}" for n in extra_audio]
+
+    def aname_of(c):
+        if audio_only(c):
+            return f"X:{c['track']}"
+        return linked_audio[vname_of(c)]
+
+    vtracks = {}
+    for name in vnames:
+        tr = ET.SubElement(video, "track")
+        ET.SubElement(tr, "enabled").text = "TRUE"
+        ET.SubElement(tr, "locked").text = "FALSE"
+        vtracks[name] = tr
 
     # ---- audio (стерео, 48кГц) ----
     audio = ET.SubElement(media, "audio")
@@ -271,15 +323,24 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     asc = ET.SubElement(afmt, "samplecharacteristics")
     ET.SubElement(asc, "depth").text = str(AUDIO_DEPTH)
     ET.SubElement(asc, "samplerate").text = str(AUDIO_RATE)
-    atrack = ET.SubElement(audio, "track", currentExplodedTrackIndex="0", totalExplodedTrackCount="1")
-    ET.SubElement(atrack, "enabled").text = "TRUE"
-    ET.SubElement(atrack, "locked").text = "FALSE"
-    btrack = None
+
+    atracks = {}
+    for k, name in enumerate(anames):
+        if k == 0:
+            tr = ET.SubElement(audio, "track",
+                               currentExplodedTrackIndex="0",
+                               totalExplodedTrackCount=str(len(anames)))
+        else:
+            tr = ET.SubElement(audio, "track")
+        ET.SubElement(tr, "enabled").text = "TRUE"
+        ET.SubElement(tr, "locked").text = "FALSE"
+        atracks[name] = tr
+
     audios = [a for a in (audios or []) if a]
     extra_tracks = []
     for _ in audios:
         # Целые дорожки: микрофоны, подложка (уровень/дакинг уже запечены
-        # в файлах, в XML идут как есть, на всю длину). A2, A3, ...
+        # в файлах, в XML идут как есть, на всю длину). Поверх дорожек клипов.
         tr = ET.SubElement(audio, "track")
         ET.SubElement(tr, "enabled").text = "TRUE"
         ET.SubElement(tr, "locked").text = "FALSE"
@@ -289,38 +350,52 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     for i, c in enumerate(clips, 1):
         orig, src_in, src_out, d = c["_orig"], c["_in"], c["_out"], c["_used"]
         start, end = t, t + d
+        only_audio = audio_only(c)
+        vi = None
 
-        # video clipitem (вложенного <id> в родном FCP7 нет — только атрибут)
-        vi = ET.SubElement(vtrack, "clipitem", id=f"clipitem-video-{i}")
-        ET.SubElement(vi, "name").text = c["file"]
-        ET.SubElement(vi, "enabled").text = "TRUE"
-        ET.SubElement(vi, "duration").text = str(d)
-        vi.append(_rate_el(fps))
-        ET.SubElement(vi, "start").text = str(start)
-        ET.SubElement(vi, "end").text = str(end)
-        ET.SubElement(vi, "in").text = str(src_in)
-        ET.SubElement(vi, "out").text = str(src_out)
-        ET.SubElement(vi, "alphatype").text = "none"
-        ET.SubElement(vi, "pixelaspectratio").text = "square"
-        ET.SubElement(vi, "anamorphic").text = "FALSE"
+        if not only_audio:
+            vtrack = vtracks[vname_of(c)]
+            # video clipitem (вложенного <id> в родном FCP7 нет — только атрибут)
+            vi = ET.SubElement(vtrack, "clipitem", id=f"clipitem-video-{i}")
+            ET.SubElement(vi, "name").text = c["file"]
+            ET.SubElement(vi, "enabled").text = "TRUE"
+            ET.SubElement(vi, "duration").text = str(d)
+            vi.append(_rate_el(fps))
+            ET.SubElement(vi, "start").text = str(start)
+            ET.SubElement(vi, "end").text = str(end)
+            ET.SubElement(vi, "in").text = str(src_in)
+            ET.SubElement(vi, "out").text = str(src_out)
+            ET.SubElement(vi, "alphatype").text = "none"
+            ET.SubElement(vi, "pixelaspectratio").text = "square"
+            ET.SubElement(vi, "anamorphic").text = "FALSE"
 
-        vi.append(_video_file_el(f"file-{i}v", c, orig, fps, width, height))
+            vi.append(_video_file_el(f"file-{i}v", c, orig, fps, width, height))
 
-        # link video<->audio
-        link = ET.SubElement(vi, "link")
-        ET.SubElement(link, "linkclipref").text = f"clipitem-audio-{i}"
-        ET.SubElement(link, "mediatype").text = "video"
-        ET.SubElement(link, "trackindex").text = "1"
-        ET.SubElement(link, "clipindex").text = "1"
+            # link video<->audio
+            link = ET.SubElement(vi, "link")
+            ET.SubElement(link, "linkclipref").text = f"clipitem-audio-{i}"
+            ET.SubElement(link, "mediatype").text = "video"
+            ET.SubElement(link, "trackindex").text = "1"
+            ET.SubElement(link, "clipindex").text = "1"
 
-        # надёжность: комментарий с планом виден в Premiere как label? кладём в lognote
-        note = f"[{c['plan']}|{c['hero']}] {c['desc']}"
-        if trim_rec and (src_out - src_in) < orig:
-            note += f" [рыба: взято {src_out - src_in}/{orig}к из середины]"
-        ET.SubElement(vi, "lognote").text = note
+            # надёжность: комментарий с планом виден в Premiere как label? кладём в lognote
+            note = f"[{c['plan']}|{c['hero']}] {c['desc']}"
+            if trim_rec and (src_out - src_in) < orig:
+                note += f" [рыба: взято {src_out - src_in}/{orig}к из середины]"
+            ET.SubElement(vi, "lognote").text = note
+
+            # маркер на начало куска: план, герой и причина склейки.
+            # Premiere покажет их в панели маркеров - сразу видно, почему склеено.
+            if markers:
+                mk = ET.SubElement(vi, "marker")
+                ET.SubElement(mk, "name").text = f"{c['plan'] or '-'} / {c['hero'] or '-'}"
+                ET.SubElement(mk, "comment").text = c["desc"] or c["file"]
+                ET.SubElement(mk, "in").text = tc(start, fps)
+                ET.SubElement(mk, "out").text = tc(start, fps)
 
         # audio clipitem: звук либо из видеофайла, либо из отдельного
         # микрофона (колонка audio из interview.py) — тогда в A1 сразу чистый звук
+        atrack = atracks[aname_of(c)]
         ai = ET.SubElement(atrack, "clipitem", id=f"clipitem-audio-{i}")
         if c.get("audio"):
             aname = Path(c["audio"]).name
@@ -341,11 +416,12 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
                                  {"file": aname, "abspath": aabspath},
                                  max(orig, src_out), fps))
         ET.SubElement(ai, "sourcetrack").append(_audio_track_el())
-        link2 = ET.SubElement(ai, "link")
-        ET.SubElement(link2, "linkclipref").text = f"clipitem-video-{i}"
-        ET.SubElement(link2, "mediatype").text = "audio"
-        ET.SubElement(link2, "trackindex").text = "1"
-        ET.SubElement(link2, "clipindex").text = "1"
+        if vi is not None:
+            link2 = ET.SubElement(ai, "link")
+            ET.SubElement(link2, "linkclipref").text = f"clipitem-video-{i}"
+            ET.SubElement(link2, "mediatype").text = "audio"
+            ET.SubElement(link2, "trackindex").text = "1"
+            ET.SubElement(link2, "clipindex").text = "1"
 
         t = end
 
@@ -434,6 +510,8 @@ def main(argv=None) -> int:
                     help="имя секвенции")
     ap.add_argument("--out", default="premiere.xml", help="выходной XML")
     ap.add_argument("--edl", default="premiere.edl", help="выходной EDL (пусто = не писать)")
+    ap.add_argument("--no-markers", action="store_true",
+                    help="не ставить маркеры с причинами склейки")
     ap.add_argument("--trim-rec", action="store_true",
                     help="РЫБА: урезать каждый кусок до верха нормы плана "
                          "(общий 8с, средний 5-6с, крупный 4с, деталь 3с), брать из середины")
@@ -475,7 +553,8 @@ def main(argv=None) -> int:
             print(f"  нет: {c['abspath']}")
 
     root = build_fcp7(clips, fps=args.fps, width=args.width, height=args.height,
-                      seq_name=args.name, trim_rec=args.trim_rec, audios=audios)
+                      seq_name=args.name, trim_rec=args.trim_rec, audios=audios,
+                      markers=not args.no_markers)
     problems = check_xml(root)
     if problems:
         print("XML не записан — структура битая (это баг, пришли мне эти строки):")

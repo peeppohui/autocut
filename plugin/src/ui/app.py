@@ -302,6 +302,9 @@ class App(tk.Tk):
                      [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv", "--media-dir", o,
                       "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]),
                 )
+                steps.append(("4. Субтитры",
+                              [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
+                               "--out", f"{o}/ryba.srt"]))
             else:
                 self.log("Режим транскрипта: после шага 2 вычеркни мусор в rz/transcript.txt "
                          "строками с '-' и жми нижнюю кнопку.")
@@ -328,6 +331,9 @@ class App(tk.Tk):
                 ("2. XML для Premiere",
                  [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv", "--media-dir", o,
                   "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]),
+                ("3. Субтитры",
+                 [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
+                  "--out", f"{o}/ryba.srt"]),
             ]
             self.go(steps, o)
         ttk.Button(fr, text="СОБРАТЬ ИЗ ПРАВЛЕНОГО ТЕКСТА",
@@ -352,6 +358,9 @@ class App(tk.Tk):
                 ("2. XML для Premiere",
                  [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv", "--media-dir", o,
                   "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]),
+                ("3. Субтитры",
+                 [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
+                  "--out", f"{o}/ryba.srt"]),
             ]
             self.go(steps, o)
         ttk.Button(fr, text="СОБРАТЬ РЫБУ", command=run).grid(row=4, column=1, pady=10)
