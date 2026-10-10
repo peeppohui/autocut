@@ -157,7 +157,9 @@ def build_interview(p: Dict, log) -> List[Step]:
                 "--media-dir", out, "--out", f"{out}/ryba.xml",
                 "--edl", f"{out}/ryba.edl", "--trim-rec"]
     if p.get("multicam"):
-        args_xml.append("--multicam")
+        # Premiere не собратывает FCP7-multiclip в
+        # секвенцию: ложим две дорожки
+        args_xml.append("--stacked")
     steps.append(Step("3. XML для Premiere", args_xml))
     steps.append(Step("4. Субтитры", [
         script(IO / "srt.py"), "--selects", f"{out}/rz/selects.csv",

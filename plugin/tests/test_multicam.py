@@ -6,6 +6,7 @@
 шкале времени. Если разъедутся - Premiere покажет второй ракурс
 с другого момента, и склейка поедет.
 """
+import copy
 import csv
 import sys
 import tempfile
@@ -36,15 +37,20 @@ with tempfile.TemporaryDirectory() as td:
     for p in (a, b):
         p.write_bytes(b"\x00" * 16)
 
+    mic = td / "_guest.wav"
+    mic.write_bytes(b"\x00" * 16)
+    host = td / "_host.wav"
+    host.write_bytes(b"\x00" * 16)
+
     csv_path = td / "selects.csv"
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["file", "plan", "hero", "duration", "in", "out",
-                    "desc", "path", "alt", "alt_path"])
+                    "desc", "path", "audio", "alt", "alt_path"])
         w.writerow(["cam.mp4", "средний1", "гость", 4.0, 10, 110,
-                    "ГОСТЬ: речь", str(a), "ref.mp4", str(b)])
+                    "ГОСТЬ: речь", str(a), str(mic), "ref.mp4", str(b)])
         w.writerow(["ref.mp4", "общий", "ведущий", 3.0, 200, 290,
-                    "ВЕДУЩИЙ: ответ", str(b), "cam.mp4", str(a)])
+                    "ВЕДУЩИЙ: ответ", str(b), str(host), "cam.mp4", str(a)])
 
     clips = premiere.resolve_media(
         premiere.load_timeline(csv_path), td)
@@ -104,13 +110,50 @@ with tempfile.TemporaryDirectory() as td:
        str(premiere.check_xml(mc)))
 
     # --- если второго ракурса нет, мультикам не строится ---
-    clips2 = list(clips)
+    # важно: глубокая копия. list() копирует только список, а словари
+    # остаются те же - и обнуление alt уезжало в исходные данные
+    clips2 = copy.deepcopy(clips)
     clips2[0]["alt"] = ""
     clips2[0]["alt_path"] = ""
     mc2 = premiere.build_fcp7(clips2, fps=25, multicam=True)
     ok("без второго ракурса - обычный клип",
        len(mc2.findall(".//multiclip")) == 1,
        str(len(mc2.findall(".//multiclip"))))
+
+    # =========================================================
+    # --stacked: две дорожки вместо multiclip
+    # Premiere 26 не превращает multiclip в мультикамерную секвенцию,
+    # поэтому ракурсы кладутся на две дорожки, и переключение идёт
+    # через Toggle Switches.
+    # =========================================================
+    st = premiere.build_fcp7(list(clips), fps=25, stacked=True)
+    tracks = st.findall(".//video/track")
+    ok("две видеодорожки", len(tracks) == 2, str(len(tracks)))
+    ok("мультикамов при этом нет", len(st.findall(".//multiclip")) == 0)
+
+    t1 = tracks[0].findall("clipitem")
+    t2 = tracks[1].findall("clipitem")
+    ok("на дорожках поровну клипов", len(t1) == len(t2),
+       f"{len(t1)} против {len(t2)}")
+
+    bad = []
+    for a, b in zip(t1, t2):
+        for f in ("start", "end", "in", "out"):
+            if a.find(f).text != b.find(f).text:
+                bad.append(f"{a.find('name').text}:{f}")
+    ok("у ракурсов совпадает тайминг", not bad, str(bad[:4]))
+    ok("ракурсы разные",
+       all(a.find("name").text != b.find("name").text
+           for a, b in zip(t1, t2)))
+    ok("на втором ракурсе метка",
+       t2[0].find("labels/label2") is not None)
+    ok("на втором ракурсе пояснение",
+       t2[0].find("logginginfo/lognote") is not None)
+
+    # звук у второго ракурса свой быть не должен - он с микрофонов
+    audio_names = {c.find("name").text for c in st.findall(".//audio/track/clipitem")}
+    ok("на аудиодорожке только микрофоны",
+       all(n.endswith(".wav") for n in audio_names), str(audio_names))
 
 print()
 if fail:

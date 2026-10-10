@@ -52,6 +52,9 @@ DISPLAY_FORMAT = "DF" if DROP_FRAME else "NDF"
 # Допустимые дорожки в колонке track таймлайна.
 VIDEO_TRACKS = {"V1", "V2", "V3", "V4"}
 AUDIO_TRACKS = {"A2", "A3", "A4"}
+# Дорожка для второго ракурса при режиме --stacked и метка на её клипах.
+ALT_TRACK = "V2"
+ALT_LABEL = "CAM B"
 NTSC_FLAG = "TRUE" if DROP_FRAME else "FALSE"
 
 
@@ -269,7 +272,8 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
                seq_name: str = None, trim_rec: bool = False,
                audios: Optional[List[str]] = None,
                markers: bool = None, multicam: bool = False,
-               multicam_name: str = "AutoCut multicam") -> ET.Element:
+               stacked: bool = False,
+               multicam_name: str = None) -> ET.Element:
     fps = EXPORT_FPS if fps is None else fps
     width = EXPORT_WIDTH if width is None else width
     height = EXPORT_HEIGHT if height is None else height
@@ -330,6 +334,10 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             vnames.append(vname_of(c))
     if not vnames:
         vnames = ["V1"]
+    # второй ракурс кладём на дорожку под основной: верхняя показывает
+    # основной кадр, нижняя включается через Toggle Switches
+    if stacked and any(c.get("alt") for c in clips) and ALT_TRACK not in vnames:
+        vnames.append(ALT_TRACK)
 
     # связанный звук видеодорожек: по порядку, начиная с A1.
     # Внутренние имена помечены префиксом, иначе авто-"A2" для звука клипа
@@ -408,9 +416,38 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             ET.SubElement(vi, "pixelaspectratio").text = "square"
             ET.SubElement(vi, "anamorphic").text = "FALSE"
 
-            alt = c.get("alt") if multicam else ""
-            alt_path = c.get("alt_path") if multicam else ""
-            if alt and alt_path and Path(alt_path).exists():
+            alt = c.get("alt") if (multicam or stacked) else ""
+            alt_path = c.get("alt_path") if (multicam or stacked) else ""
+            if stacked and alt and alt_path and Path(alt_path).exists():
+                # Второй ракурс кладём на дорожку ПОД основной: верхний
+                # показывает основной кадр, нижний переключается через
+                # Toggle Switches. Обе камеры лежат на обющей шкале
+                # времени, поэтому у второго ровно тот же in/out -
+                # значит, клики совпадают по времени.
+                lower = vtracks[ALT_TRACK]
+                uv = ET.SubElement(lower, "clipitem",
+                                   id=f"clipitem-alt-{i}")
+                ET.SubElement(uv, "name").text = alt
+                ET.SubElement(uv, "enabled").text = "TRUE"
+                ET.SubElement(uv, "duration").text = str(d)
+                uv.append(_rate_el(fps))
+                ET.SubElement(uv, "start").text = str(start)
+                ET.SubElement(uv, "end").text = str(end)
+                ET.SubElement(uv, "in").text = str(src_in)
+                ET.SubElement(uv, "out").text = str(src_out)
+                ET.SubElement(uv, "alphatype").text = "none"
+                ET.SubElement(uv, "pixelaspectratio").text = "square"
+                ET.SubElement(uv, "anamorphic").text = "FALSE"
+                uv.append(_video_file_el(f"file-{i}u",
+                                         {"file": alt, "abspath": alt_path},
+                                         orig, fps, width, height))
+                lab = ET.SubElement(uv, "labels")
+                ET.SubElement(lab, "label2").text = ALT_LABEL
+                logging_u = ET.SubElement(uv, "logginginfo")
+                ET.SubElement(logging_u, "lognote").text = (
+                    "второй ракурс: Edit > Toggle Switches, "
+                    "либо клик по глазку дорожки")
+            elif alt and alt_path and Path(alt_path).exists():
                 # Мультикам: два угла того же момента. Активным идёт тот,
                 # кого выбрал авто-монтаж (говорящий), второй можно
                 # переключить в Premiere кликом по углу.
@@ -565,6 +602,9 @@ def main(argv=None) -> int:
                     help="имя секвенции")
     ap.add_argument("--out", default="premiere.xml", help="выходной XML")
     ap.add_argument("--edl", default="premiere.edl", help="выходной EDL (пусто = не писать)")
+    ap.add_argument("--stacked", action="store_true",
+                    help="второй ракурс на отдельной видеодорожке под основной. "
+                         "Переключение: Edit > Toggle Switches")
     ap.add_argument("--multicam", action="store_true",
                     help="собрать мультикам: оба ракурса одним клипом, "
                          "переключать можно прямо в Premiere. Нужна колонка "
@@ -613,7 +653,8 @@ def main(argv=None) -> int:
 
     root = build_fcp7(clips, fps=args.fps, width=args.width, height=args.height,
                       seq_name=args.name, trim_rec=args.trim_rec, audios=audios,
-                      markers=not args.no_markers, multicam=args.multicam)
+                      markers=not args.no_markers, multicam=args.multicam,
+                      stacked=args.stacked)
     problems = check_xml(root)
     if problems:
         print("XML не записан — структура битая (это баг, пришли мне эти строки):")
