@@ -78,11 +78,16 @@
     "face_w_closeup": 0.13,
     "person_h_distant": 0.28,
     "person_h_general": 0.85,
+    "person_h_inframe_min": 0.45,
+    "person_h_fragment": 0.7,
+    "person_h_single_point": 0.6,
+    "person_h_face_only": 0.4,
     "person_min_body": 0.4,
     "crowd_people_min": 5,
     "crowd_body_max": 0.5,
     "crowd_back_people_min": 4,
     "low_confidence": 0.65,
+    "sparse_skeleton_confidence": 0.6,
     "min_visible_keypoints": 5
   },
 

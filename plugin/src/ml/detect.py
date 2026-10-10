@@ -33,6 +33,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
+import settings
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -41,15 +46,38 @@ except Exception:
 
 VIDEO_EXTS = {".mp4", ".mov", ".mxf", ".avi", ".m4v", ".mkv", ".mts", ".m2ts"}
 
-# Пороги (подобраны под 16:9, человека в кадре; крутятся флагами при желании)
-FACE_W_DETAIL = 0.28   # ширина "лица" (уши/глаза) относительно ширины кадра -> деталь
-FACE_W_CLOSEUP = 0.13  # -> крупный
-PERSON_H_DISTANT = 0.28  # высота бокса человека -> дальний
-PERSON_H_GENERAL = 0.85  # бокс почти в рост кадра
-PERSON_MIN_BODY = 0.40  # ниже — скелет не определяет ступень: человек мелкий
+# Пороги (подобраны под 16:9, человека в кадре) — из config/settings.json,
+# секция detect. Крутятся правкой конфига, не кода.
+FACE_W_DETAIL = float(settings.get("detect.face_w_detail", 0.28))   # ширина "лица" (уши/глаза) относительно ширины кадра -> деталь
+FACE_W_CLOSEUP = float(settings.get("detect.face_w_closeup", 0.13))  # -> крупный
+PERSON_H_DISTANT = float(settings.get("detect.person_h_distant", 0.28))  # высота бокса человека -> дальний
+PERSON_H_GENERAL = float(settings.get("detect.person_h_general", 0.85))  # бокс почти в рост кадра
+PERSON_MIN_BODY = float(settings.get("detect.person_min_body", 0.40))  # ниже — скелет не определяет ступень: человек мелкий
 # (экран/фото в кадре, фон). Такие кадры — либо общий, либо деталь объекта,
 # решение остаётся за человеком по превью, уверенность не завышаем.
-CONF_TH = 0.3  # порог видимости ключевой точки
+CONF_TH = float(settings.get("detect.kpt_conf", 0.3))  # порог видимости ключевой точки
+
+# Порог, ниже которого план нельзя считать надёжным — просим проверить по превью
+LOW_CONFIDENCE = float(settings.get("detect.low_confidence", 0.65))
+# Скелета почти не видно (грим, контровой свет) — режем уверенность сильнее
+SPARSE_SKELETON_CONF = float(settings.get("detect.sparse_skeleton_confidence", 0.60))
+# Мало видимых точек скелета (грим, контровой свет) — срезаем уверенность
+MIN_VISIBLE_KEYPOINTS = int(settings.get("detect.min_visible_keypoints", 5))
+
+# Порог детекции людей и число кадров на файл (по умолчанию для --conf / --frames)
+DEFAULT_DETECT_CONF = float(settings.get("detect.detect_conf", 0.35))
+DEFAULT_FRAMES = int(settings.get("detect.frames_per_file", 7))
+
+# Толпа: людей много и фигуры мелкие — это зал, а не поясной портрет
+CROWD_PEOPLE_MIN = int(settings.get("detect.crowd_people_min", 5))
+CROWD_BODY_MAX = float(settings.get("detect.crowd_body_max", 0.5))
+CROWD_BACK_PEOPLE_MIN = int(settings.get("detect.crowd_back_people_min", 4))
+
+# Пороги высоты бокса, ниже/above которых меняется план (не уверенность)
+PERSON_H_INFRAME_MIN = float(settings.get("detect.person_h_inframe_min", 0.45))
+PERSON_H_FRAGMENT = float(settings.get("detect.person_h_fragment", 0.7))
+PERSON_H_SINGLE_POINT = float(settings.get("detect.person_h_single_point", 0.6))
+PERSON_H_FACE_ONLY = float(settings.get("detect.person_h_face_only", 0.4))
 
 
 @dataclass
@@ -100,7 +128,7 @@ def _classify_core(
             if len(pts) >= 2:
                 face_w = (max(pts) - min(pts)) / max(1, img_w)
                 # если видно только нос/один глаз крупно — это почти наверняка деталь/крупный
-                if len(pts) == 1 and bh > 0.6:
+                if len(pts) == 1 and bh > PERSON_H_SINGLE_POINT:
                     face_w = max(face_w, 0.20)
         except Exception:
             face_w = 0.0
@@ -120,7 +148,7 @@ def _classify_core(
         return FrameVerdict("деталь", 0.85, people_count,
                             f"лицо/объект очень крупно (ширина лица {face_w:.2f} кадра), тела не видно.")
     # лицо видно частично + бокс обрезан сверху — тоже деталь (глаза/руки/микрофон)
-    if kpts_conf is not None and bh > 0.7 and not has_shoulders and has_face:
+    if kpts_conf is not None and bh > PERSON_H_FRAGMENT and not has_shoulders and has_face:
         return FrameVerdict("деталь", 0.65, people_count,
                             "виден фрагмент (лицо/руки) без плеч — классифицировано как деталь.")
 
@@ -131,12 +159,12 @@ def _classify_core(
 
     # 2б) толпа мелко: людей много, крупнейший мелкий — это зал, даже если
     # у ближнего ряда «нашлись» бёдра/колени (сидящие) или плечи (затылки).
-    if people_count >= 5 and bh < 0.50:
+    if people_count >= CROWD_PEOPLE_MIN and bh < CROWD_BODY_MAX:
         return FrameVerdict("общий", 0.75, people_count,
                             "толпа мелко (людей >=5, фигуры < 0.5 кадра) — общий зал.")
     # 2в) толпа со спины: нос и глаза крупнейшего не видны, людей много —
     # это зрители затылками, а не поясной портрет.
-    if people_count >= 4 and not has_nose_eyes:
+    if people_count >= CROWD_BACK_PEOPLE_MIN and not has_nose_eyes:
         return FrameVerdict("общий", 0.75, people_count,
                             "лица не видно, людей много — зрители/зал со спины.")
 
@@ -147,7 +175,7 @@ def _classify_core(
     # Лодыжки видны = фигура в полный рост = общий при любом размере бокса
     # (мелко — просто общий с меньшей уверенностью; совсем мелко уже ушло в дальний выше).
     if has_ankles:
-        if bh >= 0.45:
+        if bh >= PERSON_H_INFRAME_MIN:
             return FrameVerdict("общий", 0.90, people_count,
                                 "видны лодыжки — человек в полный рост.")
         # Мелкая фигура в рост: сцена вживую — общий; персонажи на экране
@@ -164,7 +192,7 @@ def _classify_core(
                             "видны бёдра/талия, коленей нет — срез по пояс (первый средний).")
 
     # 4) по лицу/боксу, если скелет неуверенный:
-    if face_w >= FACE_W_CLOSEUP or (has_face and not has_shoulders and bh > 0.4):
+    if face_w >= FACE_W_CLOSEUP or (has_face and not has_shoulders and bh > PERSON_H_FACE_ONLY):
         return FrameVerdict("крупный", 0.80, people_count,
                             f"голова крупно (лицо {face_w:.2f} ширины кадра), плеч почти не видно.")
     # Руки/предмет крупно: носа и глаз нет, низа тела нет, есть руки, а бокс
@@ -184,7 +212,7 @@ def _classify_core(
                             f"бокс высокий ({bh:.2f}), скелет частичный — скорее поясной.")
 
     # 5) дефолт
-    if bh >= 0.45:
+    if bh >= PERSON_H_INFRAME_MIN:
         return FrameVerdict("общий", 0.60, people_count,
                             f"человек в рост ({bh:.2f} кадра), низ виден нечётко — оставлен общий.")
     return FrameVerdict("общий", 0.50, people_count, "неуверенно — оставлен общий, проверьте превью.")
@@ -206,13 +234,14 @@ def classify_by_pose(
        любой вердикт режем до 0.60. Лучше «проверьте», чем уверенная ошибка.
     """
     v = _classify_core(img_w, img_h, box_xywh_norm, kpts_xy, kpts_conf, people_count)
-    if v.people >= 5 and v.plan in ("средний1", "средний2") and v.conf > 0.65:
-        return FrameVerdict(v.plan, 0.65, v.people,
+    if v.people >= CROWD_PEOPLE_MIN and v.plan in ("средний1", "средний2") \
+            and v.conf > LOW_CONFIDENCE:
+        return FrameVerdict(v.plan, LOW_CONFIDENCE, v.people,
                             v.detail + " Толпа в кадре — если зал целиком, смените на общий.")
     if kpts_conf is not None and v.people > 0:
         nvis = sum(1 for c in kpts_conf if float(c) > CONF_TH)
-        if nvis < 5 and v.conf > 0.60:
-            return FrameVerdict(v.plan, 0.60, v.people,
+        if nvis < MIN_VISIBLE_KEYPOINTS and v.conf > SPARSE_SKELETON_CONF:
+            return FrameVerdict(v.plan, SPARSE_SKELETON_CONF, v.people,
                                 v.detail + " Скелет почти не виден (грим/темнота) — проверьте по превью.")
     return v
 
@@ -307,7 +336,7 @@ def load_yolo(model_name: str = "yolov8n-pose.pt", device: str = "auto"):
 
 
 def analyse_video(path: Path, model, n_frames: int = 7, save_preview: Optional[Path] = None,
-                  conf: float = 0.35) -> Dict:
+                  conf: float = DEFAULT_DETECT_CONF) -> Dict:
     """Полный анализ одного файла. Возвращает dict для CSV."""
     import cv2
     dur, fps, W, H = video_info(path)
@@ -361,7 +390,7 @@ def analyse_video(path: Path, model, n_frames: int = 7, save_preview: Optional[P
     expl = Counter(v.detail for v in verdicts if v.plan == plan).most_common(1)[0][0]
     # голоса разделились едва (2:1, 4:3) — вердикт шаткий, режем уверенность
     if top * 2 <= len(verdicts) + 1:
-        avg_conf = min(avg_conf, 0.65)
+        avg_conf = min(avg_conf, LOW_CONFIDENCE)
         expl += " Голоса кадров разделились почти поровну — проверьте по превью."
     hero = guess_hero(people_counts, [v.plan for v in verdicts])
 
@@ -398,9 +427,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="AutoCut Detect — план по видео (YOLOv8-pose)")
     ap.add_argument("--input", required=True, help="папка со съёмкой или один файл")
     ap.add_argument("--output", default="clips_auto.csv", help="куда сохранить CSV для autocut.py")
-    ap.add_argument("--frames", type=int, default=7, help="кадров на файл (3-11, по умолч. 7)")
-    ap.add_argument("--model", default="yolov8n-pose.pt", help="модель ultralytics")
-    ap.add_argument("--conf", type=float, default=0.35, help="порог детекции 0.2-0.6")
+    ap.add_argument("--frames", type=int, default=DEFAULT_FRAMES, help="кадров на файл (3-11)")
+    ap.add_argument("--model", default=settings.get("detect.model", "yolov8n-pose.pt"), help="модель ultralytics")
+    ap.add_argument("--conf", type=float, default=DEFAULT_DETECT_CONF, help="порог детекции 0.2-0.6")
     ap.add_argument("--preview", default="_preview", help="папка превью (для ручной проверки)")
     ap.add_argument("--limit", type=int, default=0, help="взять только N первых файлов (для пробы)")
     ap.add_argument("--device", default="auto", help="auto|cpu|cuda (auto: GPU если завелась)")

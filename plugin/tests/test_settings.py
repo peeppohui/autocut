@@ -50,6 +50,38 @@ check("detect.kpt_conf", detect.CONF_TH, get("detect.kpt_conf"))
 check("detect.detect_conf", 0.35, get("detect.detect_conf"))
 check("detect.frames_per_file", 7, get("detect.frames_per_file"))
 
+# --- detect: эталонизация классификации на синтетике ---
+# Снята с версии до перевода порогов в конфиг (git 27aa3e6). Если эталон
+# разошёлся — значит, перенос поменял поведение эвристики.
+def _kp(show):
+    xs = [0.5] * 17
+    ys = [0.5] * 17
+    c = [0.0] * 17
+    for i in show:
+        c[i] = 1.0
+    return [[x, y] for x, y in zip(xs, ys)], c
+
+
+DETECT_CASES = [
+    ("никого нет", None, None, None, 0, "общий", 0.55),
+    ("дальний", (0.5, 0.5, 0.1, 0.2), *_kp([5, 6]), 1, "дальний", 0.60),
+    ("общий в рост", (0.5, 0.5, 0.3, 0.9),
+     *_kp([5, 6, 11, 12, 13, 14, 15, 16]), 1, "общий", 0.90),
+    ("средний2", (0.5, 0.5, 0.3, 0.7), *_kp([5, 6, 11, 12, 13, 14]), 1, "средний2", 0.85),
+    ("средний1", (0.5, 0.5, 0.3, 0.6), *_kp([5, 6, 11, 12]), 1, "средний1", 0.60),
+    ("деталь руки", (0.8, 0.5, 0.2, 0.5), *_kp([7, 8, 9, 10]), 1, "деталь", 0.60),
+    ("толпа мелко", (0.5, 0.5, 0.15, 0.45), *_kp([5, 6, 11, 12]), 6, "общий", 0.60),
+]
+
+for name, box, kpts, kconf, people, want_plan, want_conf in DETECT_CASES:
+    v = detect.classify_by_pose(1920, 1080, box, kpts, kconf, people)
+    check(f"detect эталон «{name}»", (v.plan, v.conf), (want_plan, want_conf))
+
+# --- autocut: эталон раскладки демо-набора ---
+demo_order = [c.plan for c in autocut.suggest_order(autocut.demo_clips("digest"), mode="digest")]
+rep = autocut.validate_sequence(autocut.suggest_order(autocut.demo_clips("digest"), mode="digest"))
+check("autocut эталон оценки демо-дайджеста", (rep["total"], rep["grade"]), (92.5, "ОТЛИЧНО"))
+
 # --- структура: ключи, на которые ссылается код, существуют ---
 for dotted in ("project.fps", "project.drop_frame", "export.fps",
                "digest.rec_duration_sec", "detect.face_w_detail",
