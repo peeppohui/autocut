@@ -44,6 +44,16 @@
     "require_cutaway_on_jump": true
   },
 
+  "black": {
+    "_note": "src/ml/blackframes.py — поиск кадров, где камера не снимала. Звук есть, картинки нет, такой кусок в рыбу не идёт.",
+    "enabled": true,
+    "min_dur_sec": 0.5,
+    "black_ratio": 0.10,
+    "sample_fps": 2.0,
+    "drop_ratio": 0.8,
+    "swap_to_alt": true
+  },
+
   "digest": {
     "_note": "src/modes/autocut.py — раскладка кадров по крупности.",
     "rec_duration_sec": {

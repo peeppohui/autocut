@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
 import settings
+import blackframes
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -466,6 +467,55 @@ def load_broll(path: Path) -> List[Dict]:
     return rows
 
 
+def black_scan(wide: Path, gcam: Path, cache_dir: Path) -> Dict[str, list]:
+    """Где в каждой камере нет картинки. Результат кэшируется на диске."""
+    iv = {}
+    for key, path in (("wide", wide), ("gcam", gcam)):
+        if not Path(path).is_file():
+            continue
+        found = blackframes.black_intervals(
+            path, cache_dir=cache_dir,
+            min_dur=float(settings.get("black.min_dur_sec", 0.5)),
+            pix_th=float(settings.get("black.black_ratio", 0.10)),
+            sample_fps=float(settings.get("black.sample_fps", 2.0)))
+        if found:
+            black = sum(b - a for a, b in found)
+            print(f"  {key}: без картинки {black:.1f}с в {len(found)} "
+                  f"участках — минуем их")
+        iv[key] = found
+    return iv
+
+
+def plan_cameras(chunks, wide: Path, gcam: Path, cache_dir: Path):
+    """К каждому куску решаем, какая камера основная.
+
+    Камеру выбирает говорящий, но если она молчит картинкой, а вторая
+    снимает - берём вторую: выбрасывать кусок из-за одной мёртвой камеры
+    обидно. Выбрасываем только когда не снимает никто.
+    """
+    enabled = bool(settings.get("black.enabled", True))
+    ratio = float(settings.get("black.drop_ratio", 0.8))
+    swap = bool(settings.get("black.swap_to_alt", True))
+    iv = black_scan(wide, gcam, cache_dir) if enabled else {}
+    planned, dropped, swapped = [], 0, 0
+    for (i, o, sp, text) in chunks:
+        want = "gcam" if sp == "гость" else "wide"
+        other = "wide" if want == "gcam" else "gcam"
+        if iv:
+            want_black = blackframes.is_black(iv.get(want, []), i, o, ratio)
+            if want_black:
+                if blackframes.is_black(iv.get(other, []), i, o, ratio) \
+                        or not swap:
+                    dropped += 1
+                    continue
+                want, swapped = other, swapped + 1
+        planned.append((i, o, sp, text, want))
+    if dropped or swapped:
+        print(f"Камера: выброшено {dropped} кусков без картинки, "
+              f"у {swapped} взят запасной ракурс.")
+    return planned, dropped, swapped
+
+
 def run_from_transcript(args) -> int:
     """Сборка selects из правленого transcript.txt (второй проход:
     текст уже вычищен человеком). Видео нужны для путей, микрофоны — нет."""
@@ -485,19 +535,18 @@ def run_from_transcript(args) -> int:
         print("Микрофонов _guest/_host.wav нет — звук в A1 пойдёт с камер.")
     broll = load_broll(Path(args.broll)) if args.broll and Path(args.broll).is_file() else []
 
-    def vid(sp):
-        return (wide, args.wide_plan, "ведущий") if sp == "ведущий" \
-            else (gcam, args.guest_plan, "гость")
-
-    def alt_vid(sp):
-        """Второй ракурс: та камера, которая не говорит."""
-        return (gcam, args.guest_plan) if sp == "ведущий" else (wide, args.wide_plan)
+    CAMS = {"wide": (wide, args.wide_plan, "ведущий"),
+            "gcam": (gcam, args.guest_plan, "гость")}
+    chunks, _, _ = plan_cameras(chunks, wide, gcam, out)
+    if not chunks:
+        print("После отсева чёрного не осталось ни одного куска.")
+        return 1
 
     rows = []
     bi = 0
-    for k, (i, o, sp, text) in enumerate(chunks):
-        vf, vplan, vhero = vid(sp)
-        avf, _ = alt_vid(sp)
+    for k, (i, o, sp, text, camkey) in enumerate(chunks):
+        vf, vplan, vhero = CAMS[camkey]
+        avf = CAMS["gcam" if camkey == "wide" else "wide"][0]
         tag = "ГОСТЬ" if sp == "гость" else "ВЕДУЩИЙ"
         row = {"file": vf.name, "plan": vplan, "hero": vhero,
                "duration": round(o - i, 2), "in": round(i, 2), "out": round(o, 2),
@@ -520,8 +569,9 @@ def run_from_transcript(args) -> int:
         w.writerows(rows)
     with open(out / "speech.json", "w", encoding="utf-8") as f:
         import json
-        json.dump([{"start": round(i, 2), "end": round(o, 2)} for i, o, _, _ in chunks], f)
-    total = sum(o - i for i, o, _, _ in chunks)
+        json.dump([{"start": round(i, 2), "end": round(o, 2)}
+                   for i, o, _, _, _ in chunks], f)
+    total = sum(o - i for i, o, _, _, _ in chunks)
     print(f"Собрано из правленого транскрипта: {len(chunks)} кусков, {total:.1f}с -> {out/'selects.csv'}")
     print(f"Дальше: premiere.py --timeline {out/'selects.csv'} --media-dir . --out ryba.xml --trim-rec")
     return 0
@@ -611,23 +661,19 @@ def run_multicam(args) -> int:
               f"--from-transcript {out/'transcript.txt'}")
         return 0
 
-    def vid(sp):
-        return (wide, args.wide_plan, "ведущий") if sp == "ведущий" \
-            else (gcam, args.guest_plan, "гость")
+    CAMS = {"wide": (wide, args.wide_plan, "ведущий"),
+            "gcam": (gcam, args.guest_plan, "гость")}
+    chunks, n_black, n_swap = plan_cameras(chunks, wide, gcam, out)
 
     def susp(text):
         # короткие куски — под вопросом: программа их оставляет, но метит
         return len(text.split()) <= 2
 
-    def alt_vid(sp):
-        """Второй ракурс для мультикама: та камера, которая не говорит."""
-        return (gcam, args.guest_plan) if sp == "ведущий" else (wide, args.wide_plan)
-
     rows = []
     bi = 0
     susp_list = []
-    for k, (i, o, sp, text) in enumerate(chunks):
-        vf, vplan, vhero = vid(sp)
+    for k, (i, o, sp, text, camkey) in enumerate(chunks):
+        vf, vplan, vhero = CAMS[camkey]
         tag = "ГОСТЬ" if sp == "гость" else "ВЕДУЩИЙ"
         desc = f"{tag}: {text[:110]}"
         if susp(text):
@@ -636,7 +682,7 @@ def run_multicam(args) -> int:
         if is_ambig(i, o):
             desc = "[~] " + desc
             susp_list.append((i, o, sp, text + " (микрофоны слышат одинаково)"))
-        avf, _ = alt_vid(sp)
+        avf = CAMS["gcam" if camkey == "wide" else "wide"][0]
         rows.append({"file": vf.name, "plan": vplan, "hero": vhero,
                      "duration": round(o - i, 2), "in": round(i, 2), "out": round(o, 2),
                      "desc": desc, "path": str(vf.absolute()),
@@ -659,10 +705,11 @@ def run_multicam(args) -> int:
 
     with open(out / "speech.json", "w", encoding="utf-8") as f:
         import json
-        json.dump([{"start": round(i, 2), "end": round(o, 2)} for i, o, _, _ in chunks], f)
+        json.dump([{"start": round(i, 2), "end": round(o, 2)}
+                   for i, o, _, _, _ in chunks], f)
 
-    tg = sum(o - i for i, o, sp, _ in chunks if sp == "гость")
-    th = sum(o - i for i, o, sp, _ in chunks if sp == "ведущий")
+    tg = sum(o - i for i, o, sp, _, _ in chunks if sp == "гость")
+    th = sum(o - i for i, o, sp, _, _ in chunks if sp == "ведущий")
     n_joints = max(0, len(chunks) - 1)
     report = [
         f"Рыба интервью (мультикамера): {wide.name} + {gcam.name}",
@@ -673,10 +720,11 @@ def run_multicam(args) -> int:
         f"Паразитов сразу: {len(auto_g) + len(auto_h)}. Фраз под перебивкой: {len(covered)}.",
         f"Стыков прикрыто: {n_joints if broll else 0} из {n_joints}."
         + ("" if broll else " (нет --broll — закрой вручную)"),
+        f"Без картинки выброшено: {n_black}. Взят запасной ракурс: {n_swap}.",
         "",
         "СОМНИТЕЛЬНЫЕ (короткие — глянь, нужны ли; помечены [?] в selects):",
-        *[f"  {i:.1f}-{o:.1f} [{sp}] «{text[:80]}»" for i, o, sp, text in
-          [(i, o, sp, t) for i, o, sp, t in chunks if len(t.split()) <= 2][:20]],
+        *[f"  {i:.1f}-{o:.1f} [{sp}] «{text[:80]}»" for i, o, sp, text, _ in
+          [(i, o, sp, t, c) for i, o, sp, t, c in chunks if len(t.split()) <= 2][:20]],
         "",
         "ВРУЧНУЮ:",
         *[f"  {w.start:.1f}с [{sp}] «{w.w}»" for w, sp in left_manual[:40]],
