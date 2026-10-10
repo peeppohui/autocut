@@ -430,11 +430,14 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             ET.SubElement(link, "trackindex").text = "1"
             ET.SubElement(link, "clipindex").text = "1"
 
-            # надёжность: комментарий с планом виден в Premiere как label? кладём в lognote
+            # Комментарий с планом и причиной склейки. По схеме FCP7 lognote
+            # лежит внутри logginginfo: напрямую в clipitem такого элемента
+            # нет, Premiere такой файл читал как угодно.
             note = f"[{c['plan']}|{c['hero']}] {c['desc']}"
             if trim_rec and (src_out - src_in) < orig:
                 note += f" [рыба: взято {src_out - src_in}/{orig}к из середины]"
-            ET.SubElement(vi, "lognote").text = note
+            logging = ET.SubElement(vi, "logginginfo")
+            ET.SubElement(logging, "lognote").text = note
 
             # маркер на начало куска: план, герой и причина склейки.
             # Premiere покажет их в панели маркеров - сразу видно, почему склеено.
