@@ -155,6 +155,15 @@ with tempfile.TemporaryDirectory() as td:
     ok("на аудиодорожке только микрофоны",
        all(n.endswith(".wav") for n in audio_names), str(audio_names))
 
+    # У клипа ОБЯЗАН быть <file>, иначе Premiere не импортирует файл вовсе.
+    # Здесь это ломалось: ветка stacked создавала второй ракурс и забывала
+    # прописать файл основному клипу - V1 шла вообще без ссылки на медиа.
+    nofile = [c.find("name").text for t in tracks
+              for c in t.findall("clipitem") if c.find("file") is None]
+    ok("у каждого клипа есть <file>", not nofile, str(nofile[:4]))
+    ok("второй ракурс тоже ссылается на файл",
+       all(c.find("file") is not None for c in t2))
+
 print()
 if fail:
     print(f"MULTICAM FAIL ({len(fail)}): {fail}")

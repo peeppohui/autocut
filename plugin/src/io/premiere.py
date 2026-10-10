@@ -426,9 +426,14 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             if stacked and alt and alt_path and Path(alt_path).exists():
                 # Второй ракурс кладём на дорожку ПОД основной: верхний
                 # показывает основной кадр, нижний переключается через
-                # Toggle Switches. Обе камеры лежат на обющей шкале
+                # Toggle Switches. Обе камеры лежат на общей шкале
                 # времени, поэтому у второго ровно тот же in/out -
                 # значит, клики совпадают по времени.
+                # Основной клип всё равно обязан ссылаться на свой файл:
+                # без <file> у клипа V1 Premiere отказывался импортировать
+                # весь XML, и в панели видео было пусто.
+                vi.append(_video_file_el(f"file-{i}v", c, orig, fps,
+                                         width, height))
                 lower = vtracks[ALT_TRACK]
                 uv = ET.SubElement(lower, "clipitem",
                                    id=f"clipitem-alt-{i}")
