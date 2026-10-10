@@ -268,7 +268,13 @@ class App(tk.Tk):
         only_tx = tk.BooleanVar(value=False)
         ttk.Checkbutton(fr, text="Сначала только транскрипт (правлю текст, потом собираю)",
                         variable=only_tx).grid(row=7, column=1, sticky="w", pady=3)
-        txf = self.field(fr, "Правленый transcript.txt:", 9)
+        # Второй ракурс кладём на отдельную видеодорожку: Premiere не
+        # понимает FCP7-multiclip, а две дорожки работают всегда.
+        # Переключение потом - Edit > Toggle Switches.
+        two_cam = tk.BooleanVar(value=True)
+        ttk.Checkbutton(fr, text="Второй ракурс (две дорожки, Toggle Switches)",
+                        variable=two_cam).grid(row=8, column=1, sticky="w", pady=3)
+        txf = self.field(fr, "Правленый transcript.txt:", 10)
 
         def run():
             paths = {}
@@ -300,7 +306,8 @@ class App(tk.Tk):
                 steps.append(
                     ("3. XML для Premiere",
                      [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv", "--media-dir", o,
-                      "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]),
+                      "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]
+                     + (["--stacked"] if two_cam.get() else [])),
                 )
                 steps.append(("4. Субтитры",
                               [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
@@ -309,7 +316,7 @@ class App(tk.Tk):
                 self.log("Режим транскрипта: после шага 2 вычеркни мусор в rz/transcript.txt "
                          "строками с '-' и жми нижнюю кнопку.")
             self.go(steps, o)
-        ttk.Button(fr, text="СОБРАТЬ РЫБУ", command=run).grid(row=8, column=1, pady=10,
+        ttk.Button(fr, text="СОБРАТЬ РЫБУ", command=run).grid(row=9, column=1, pady=10,
                                                               sticky="e")
 
         def run_from_tx():
@@ -330,14 +337,15 @@ class App(tk.Tk):
                  + (["--broll", bro.get().strip()] if bro.get().strip() else [])),
                 ("2. XML для Premiere",
                  [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv", "--media-dir", o,
-                  "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]),
+                  "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]
+                 + (["--stacked"] if two_cam.get() else [])),
                 ("3. Субтитры",
                  [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
                   "--out", f"{o}/ryba.srt"]),
             ]
             self.go(steps, o)
         ttk.Button(fr, text="СОБРАТЬ ИЗ ПРАВЛЕНОГО ТЕКСТА",
-                   command=run_from_tx).grid(row=10, column=1, pady=6)
+                   command=run_from_tx).grid(row=11, column=1, pady=6)
 
     def build_single(self, fr):
         src = self.field(fr, "Видео интервью:", 0)

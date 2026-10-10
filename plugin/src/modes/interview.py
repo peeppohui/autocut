@@ -489,14 +489,20 @@ def run_from_transcript(args) -> int:
         return (wide, args.wide_plan, "ведущий") if sp == "ведущий" \
             else (gcam, args.guest_plan, "гость")
 
+    def alt_vid(sp):
+        """Второй ракурс: та камера, которая не говорит."""
+        return (gcam, args.guest_plan) if sp == "ведущий" else (wide, args.wide_plan)
+
     rows = []
     bi = 0
     for k, (i, o, sp, text) in enumerate(chunks):
         vf, vplan, vhero = vid(sp)
+        avf, _ = alt_vid(sp)
         tag = "ГОСТЬ" if sp == "гость" else "ВЕДУЩИЙ"
         row = {"file": vf.name, "plan": vplan, "hero": vhero,
                "duration": round(o - i, 2), "in": round(i, 2), "out": round(o, 2),
-               "desc": f"{tag}: {text[:110]}", "path": str(vf.absolute())}
+               "desc": f"{tag}: {text[:110]}", "path": str(vf.absolute()),
+               "alt": avf.name, "alt_path": str(avf.absolute())}
         if has_mics:
             row["audio"] = str(gw.absolute()) if sp == "гость" else str(hw.absolute())
         rows.append(row)
