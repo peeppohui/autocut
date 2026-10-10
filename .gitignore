@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Модель качается сама (ultralytics), в репозитории не храним
+yolov8n-pose.pt
+
+# Исходники и тестовые материалы — файлы остаются на диске,
+# но в историю git не попадают (85 МБ видео раздувают репозиторий)
+*.mp4
+*.mov
+*.mxf
+*.avi
+*.m4v
+*.mkv
+*.mts
+*.m2ts
+*.wav
+*.mp3
+_vk/
+
+# Бэкапы
+*.zip
+
+# Артефакты пайплайна — перегенерируются запуском
+digest_out/
+interview_out/
+review_out/
+synced/
+rz/
+timeline*.csv
+ryba.xml
+premiere.xml
+*.edl
+clips*.csv
+report.txt
+transcript.txt
+selects.csv
+speech.json
+
+# Превью и промежуточные картинки детекта
+preview/
+sheets/
+shots*/
+*_preview/
