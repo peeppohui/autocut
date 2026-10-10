@@ -51,6 +51,19 @@ MIC_MISMATCH_TOLERANCE = float(settings.get("sync.mic_cross_check_tolerance_sec"
 VOTE_BLOCK_SEC = float(settings.get("sync.vote_block_sec", 60))
 REFINE_WINDOW_SEC = float(settings.get("sync.refine_window_sec", 3))
 
+# Допустимый разброс между попарными измерениями в глобальном согласовании.
+# Если все пары дают один и тот же набор сдвигов, расхождение будет
+# крошечным (десятые доли секунды на 10 минутах записи). Превышение
+# означает, что часть пар совпала случайно — доверять нельзя.
+GLOBAL_MAX_RESIDUAL = float(settings.get("sync.global_max_residual_sec", 1.5))
+# Окно поиска в глобальном согласовании. НЕ выводим из разницы длительностей:
+# файлы часто режутся до одинаковой длины, а реальные сдвиги при этом большие.
+GLOBAL_MAX_LAG = float(settings.get("sync.global_max_lag_sec", 600.0))
+# Минимальная острота пика, при которой измерению можно верить. Без этой
+# проверки нули от неудачных измерений идеально «сходятся» и выдают
+# правдоподобный, но выдуманный результат.
+GLOBAL_MIN_CONTRAST = float(settings.get("sync.global_min_contrast", 2.0))
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -72,17 +85,21 @@ def read_wav(path: Path):
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def envelope(x, sr: int = 16000, win: float = 0.02):
-    """Огибающая громкости: убираем медленный дрейф/субсонику окном 0.2с
-    (голос от 100 Гц не трогаем), сглаживаем окном 20мс, глушим одиночные
-    громкие стуки капом на 95-м перцентиле, децимация до ~50 Гц."""
+def envelope(x, sr: int = 16000, win: float = 0.02, rate: float = 50.0,
+             hp: float = 0.2):
+    """Огибающая громкости: убираем медленный дрейф/субсонику окном hp
+    (голос от 100 Гц не трогаем), сглаживаем окном win, децимация до rate Гц.
+
+    rate и hp — необязательные: старый поиск от опоры работает на значениях
+    по умолчанию, глобальному согласованию нужна другая детализация.
+    """
     import numpy as np
-    wbase = max(1, int(sr * 0.2))
+    wbase = max(1, int(sr * hp))
     x = x - np.convolve(x, np.ones(wbase) / wbase, mode="same")
     w = max(1, int(sr * win))
     env = np.convolve(np.abs(x), np.ones(w) / w, mode="same")
-    step = max(1, int(sr / 50))
-    return env[::step], sr / step
+    step = max(1, int(sr / rate))
+    return env[::step], rate
 
 
 def _winsor(x, blklen: int, q: float = 99.0):
@@ -263,20 +280,148 @@ def run_video_encode(args_list):
             raise
 
 
-def pad_video_to_zero(src: Path, offset: float, dst: Path, is_ref: bool = False):
+def video_params(path: Path):
+    """(ширина, высота, fps) первого видеопотока. None, если не разобрали."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,r_frame_rate",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=60).stdout.split()
+        w, h, rate = int(out[0]), int(out[1]), out[2]
+        num, _, den = rate.partition("/")
+        fps = float(num) / float(den or 1)
+        return w, h, round(fps, 3)
+    except Exception:
+        return None
+
+
+def parse_conform(spec: str):
+    """'1920x1080@25' -> (1920, 1080, 25). Пустая строка — не приводить."""
+    if not spec:
+        return None
+    try:
+        res, _, fps = spec.partition("@")
+        w, _, h = res.partition("x")
+        return int(w), int(h), (float(fps) if fps else 0.0) or None
+    except Exception:
+        raise ValueError(f"Не понял формат приведения: {spec!r}. "
+                         f"Ожидалось 1920x1080@25")
+
+
+def measure_pair(a_env, b_env, rate: float, max_lag_sec: float):
+    """Полная кросс-корреляция двух дорожек через FFT.
+
+    Работает без хлопка: общий сигнал даёт сама речь и шум зала, а огибающая
+    за 10 минут накапливает достаточно материала для острого пика.
+
+    Возвращает (lag, contrast, peak, second_peak).
+    lag > 0 означает: b стартовал ПОЗЖЕ a на lag секунд.
+    """
+    import numpy as np
+    a = a_env - a_env.mean()
+    b = b_env - b_env.mean()
+    n = 1 << int(np.ceil(np.log2(len(a) + len(b))))
+    max_valid = n // 2 - 1
+    ml = int(max_lag_sec * rate)
+    if ml <= 0 or max_valid <= 0:
+        return 0.0, 0.0, 0.0, 0.0, False
+    clamped = False
+    if ml > max_valid:
+        # окно не влезает в длину сигнала: ищем максимально возможное,
+        # но честно сообщаем, что искали не всё
+        ml = max_valid
+        clamped = True
+    # отрицательные лаги в хвосте, положительные в начале
+    cc = np.fft.irfft(np.fft.rfft(a, n) * np.conj(np.fft.rfft(b, n)), n)
+    cc = np.concatenate((cc[-ml:], cc[:ml + 1]))
+    lags = np.arange(-ml, ml + 1)
+
+    i = int(np.argmax(cc))
+    peak = float(cc[i])
+    bg = float(np.median(np.abs(cc)))
+    contrast = peak / (bg + 1e-12)
+
+    # второй пик не ближе 10 секунд — иначе это тот же самый максимум
+    guard = min(int(10.0 * rate), max(1, len(cc) // 2))
+    cc2 = cc.copy()
+    a0, b0 = max(0, i - guard), min(len(cc), i + guard)
+    cc2[a0:b0] = -np.inf
+    second = float(cc2.max())
+    # окно короче половины сигнала — пик может оказаться краем, не пиком
+    usable = not clamped or (ml >= rate * 30)
+    return float(lags[i]) / rate, float(contrast), peak, second, usable
+
+
+def solve_global_offsets(measurements, names, ref_name):
+    """Сводит попарные сдвиги к одному набору смещений (метод наименьших квадратов).
+
+    measurements: {(a, b): lag} — lag означает "b позже a на lag секунд".
+    Каждое измерение независимо; если все они согласуются между собой,
+    решение верное. Возвращает (offsets, max_residual) либо (None, 0).
+    """
+    import numpy as np
+    free = [n for n in names if n != ref_name]
+    if not free:
+        return {ref_name: 0.0}, 0.0
+    index = {n: i for i, n in enumerate(free)}
+
+    rows, rhs = [], []
+    for (a, b), lag in measurements.items():
+        row = np.zeros(len(free))
+        # offset[b] - offset[a] = lag, offset[ref] = 0
+        if b in index:
+            row[index[b]] += 1.0
+        if a in index:
+            row[index[a]] -= 1.0
+        rows.append(row)
+        rhs.append(lag)
+
+    A = np.array(rows)
+    y = np.array(rhs)
+    sol, *_ = np.linalg.lstsq(A, y, rcond=None)
+
+    offsets = {ref_name: 0.0}
+    for n in free:
+        offsets[n] = float(sol[index[n]])
+    residuals = [abs(float(A[i] @ sol) - y[i]) for i in range(len(y))]
+    return offsets, (max(residuals) if residuals else 0.0)
+
+
+def pad_video_to_zero(src: Path, offset: float, dst: Path, is_ref: bool = False,
+                      conform: str = ""):
     """Видео: чёрные кадры + тишина в начало. Опора тоже может требовать
-    подрезки, если кто-то стартовал раньше неё (offset < 0)."""
-    if offset <= 0.01 and is_ref:
-        run_video_encode(["ffmpeg", "-y", "-v", "error", "-i", str(src)] +
-                         vcodec_args() + ["-c:a", "aac", str(dst)])
-        return
+    подрезки, если кто-то стартовал раньше неё (offset < 0).
+
+    conform: "1920x1080@25" — привести разрешение и частоту кадров.
+    Нужен, когда камеры разные (например 4K50 против 1080p25): иначе в
+    секвенцию попадёт клип другого размера и частоты.
+    """
+    vfilters = []
+    if conform:
+        w, h, fps = parse_conform(conform)
+        vfilters.append(f"scale={w}:{h}:flags=lanczos")
+        vfilters.append(f"fps={fps}")
+
     if offset <= 0.01:
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
-                        "-c", "copy", str(dst)], check=True)
+        if not vfilters:
+            if is_ref:
+                run_video_encode(["ffmpeg", "-y", "-v", "error", "-i", str(src)] +
+                                 vcodec_args() + ["-c:a", "aac", str(dst)])
+            else:
+                subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
+                                "-c", "copy", str(dst)], check=True)
+            return
+        chain = ",".join(vfilters)
+        run_video_encode(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", chain] +
+            vcodec_args() + ["-c:a", "aac", str(dst)])
         return
+
+    vf = ",".join([f"tpad=start_duration={offset:.3f}:color=black"] + vfilters)
     run_video_encode(
         ["ffmpeg", "-y", "-v", "error", "-i", str(src),
-         "-vf", f"tpad=start_duration={offset:.3f}:color=black",
+         "-vf", vf,
          "-af", f"adelay={int(offset * 1000)}:all=1"] +
         vcodec_args() + ["-c:a", "aac", str(dst)])
 
@@ -288,6 +433,13 @@ def main(argv=None) -> int:
     ap.add_argument("--mic-guest", default="", help="микрофон гостя")
     ap.add_argument("--mic-host", default="", help="микрофон ведущего")
     ap.add_argument("--outdir", default="synced", help="куда сложить синхрон")
+    ap.add_argument("--conform", default="",
+                    help="привести видео к общему виду: 1920x1080@25. "
+                         "Нужно, когда камеры разные (4K50 против 1080p25), "
+                         "иначе в секвенцию попадёт клип другого размера")
+    ap.add_argument("--no-global", action="store_true",
+                    help="не пытаться согласовать все дорожки между собой, "
+                         "искать сдвиг только относительно опоры")
     ap.add_argument("--max-lag", type=float,
                     default=float(settings.get("sync.max_lag_sec", 60.0)),
                     help="макс. рассинхрон (сек)")
@@ -297,6 +449,16 @@ def main(argv=None) -> int:
                          "Нужно, если автопоиск дал качество < 0.3: замерь сдвиг по хлопку "
                          "в любом редакторе и впиши сюда.")
     args = ap.parse_args(argv)
+
+    conform = ""
+    if args.conform:
+        parse_conform(args.conform)   # проверяем формат сразу, до работы
+        conform = args.conform
+    elif args.cam:
+        # камеры разного размера/частоты — приводим гостя к параметрам опоры
+        ref_v = video_params(Path(args.ref))
+        if ref_v:
+            conform = f"{ref_v[0]}x{ref_v[1]}@{ref_v[2]:g}"
 
     import numpy as np
     out = Path(args.outdir)
@@ -337,67 +499,150 @@ def main(argv=None) -> int:
             except ValueError:
                 print(f"Не понял --set-offset {s!r}, пропускаю.")
     ref_dur = file_dur(Path(args.ref))
-    for name, p in jobs[1:]:
-        if name in manual:
-            raw[name], quals[name] = manual[name], 1.0
-            contr[name] = 99.0
-            print(f"  {name}: РУЧНОЙ сдвиг {manual[name]:+.2f}с")
-            continue
-        # окно из разницы длительностей: рекордер на 2 мин длиннее не может
-        # отставать меньше чем на ~2 мин (плюс запас)
-        window = auto_window(ref_dur, file_dur(p), args.max_lag)
-        off, q, co = find_offset(envs["ref"], envs[name], rate, window)
-        if (q < TRUST_QUALITY and co < TRUST_CONTRAST) and window < 600:
-            # слабый пик: пробуем окно вдвое шире
-            off2, q2, co2 = find_offset(envs["ref"], envs[name], rate, min(600.0, window * 2))
-            if co2 > co:
-                off, q, co = off2, q2, co2
-                print(f"  {name}: узкий поиск провален, взят широкий.")
-        raw[name], quals[name], contr[name] = round(off, 3), round(q, 3), round(co, 1)
-        bad = q < TRUST_QUALITY and co < TRUST_CONTRAST
-        if quals[name] == 0.0:
-            raw[name] = 0.0
-            print(f"  {name}: НЕ СВЕДЁН (в звуке нет общего сигнала). "
-                  f"Замерь сдвиг по хлопку и перезапусти с --set-offset {name}=N.")
-        print(f"  {name}: сдвиг {off:+.2f}с, качество {q:.2f}, контраст {co:.1f}"
-              + ("  <-- ПРОВЕРЬ ВРУЧНУЮ" if bad else
-                 ("  (качество низкое от мусора в начале, но пик острый — скорее верно)"
-                   if q < TRUST_QUALITY else "")))
+
+    # --- Шаг 1: глобальное согласование по всем парам сразу ---
+    # Пара с общим сигналом даёт сдвиг независимо, а не относительно одной
+    # «опоры». Если все пары согласуются между собой — решение верное,
+    # и хлопок для этого не нужен.
+    global_offsets = None
+    if len(jobs) > 1 and not manual and not args.no_global:
+        rates = []
+        names = [n for n, _ in jobs]
+        for rate_hz in (20.0, 50.0):
+            envs2 = {}
+            for name, p in jobs:
+                w = tmp / f"{name}.wav"
+                if not w.is_file():
+                    to_mono16k(p, w)
+                # окно сглаживания держим постоянным по времени (0.04 с),
+                # меняется только частота дискретизации огибающей
+                envs2[name], rate_now = envelope(read_wav(w), rate=rate_hz,
+                                                 win=0.04, hp=0.3)
+            rate = rate_now
+            pairs = {}
+            worst_contrast = None
+            invalid = []
+            dur_map = {n: file_dur(p) for n, p in jobs}
+            for i in range(len(names)):
+                for j in range(len(names)):
+                    if i == j:
+                        continue
+                    an, bn = names[i], names[j]
+                    window = min(GLOBAL_MAX_LAG, max(60.0,
+                                                    max(dur_map.values()) + 30.0))
+                    lag, contrast, peak, second, usable = measure_pair(
+                        envs2[an], envs2[bn], rate, window)
+                    pairs[(an, bn)] = lag
+                    # измерение годится, только если пик настоящий и окно
+                    # не было урезано до бесполезного размера
+                    if not usable or contrast < GLOBAL_MIN_CONTRAST:
+                        invalid.append(f"{an}<->{bn} (контраст {contrast:.1f})")
+                    r = peak / (second + 1e-12)
+                    if worst_contrast is None or r < worst_contrast:
+                        worst_contrast = r
+            offsets_g, residual = solve_global_offsets(pairs, names, "ref")
+            rates.append((rate_hz, residual, worst_contrast, offsets_g, invalid))
+
+        # берём детализацию, где попарные измерения сошлись лучше всего
+        rates.sort(key=lambda t: t[1])
+        rate_hz, residual, worst_ratio, offsets_g, invalid = rates[0]
+        # принимаем только если все пары дали настоящий пик И сошлись между собой
+        if residual <= GLOBAL_MAX_RESIDUAL and not invalid:
+            global_offsets = offsets_g
+            print(f"Глобальное согласование по {len(names)} дорожкам "
+                  f"(огибающая {rate_hz:g} Гц):")
+            for n in names:
+                print(f"  {n:11} начало записи {offsets_g[n]:+8.2f}с "
+                      f"(относительно ref)")
+            print(f"  Максимальный разброс между парами: {residual:.2f}с "
+                  f"(порог {GLOBAL_MAX_RESIDUAL}с). Сдвиги согласованы между собой.")
+        else:
+            why = []
+            if invalid:
+                why.append("не годные пики: " + ", ".join(invalid[:4]))
+            if residual > GLOBAL_MAX_RESIDUAL:
+                why.append(f"разброс {residual:.2f}с > {GLOBAL_MAX_RESIDUAL}с")
+            print("Глобальное согласование не принято (" + "; ".join(why) +
+                  ") — перехожу на поиск от опоры.")
+            for rh, res, wr, _, inv in rates:
+                print(f"    огибающая {rh:g} Гц: разброс {res:.2f}с, "
+                      f"негодных пар {len(inv)}")
+
+    if global_offsets is not None:
+        raw = {n: global_offsets[n] for n, _ in jobs}
+        quals = {n: 1.0 for n, _ in jobs}
+        contr = {n: 99.0 for n, _ in jobs}
+    else:
+        raw = {"ref": 0.0}
+        quals = {"ref": 1.0}
+        contr = {"ref": 99.0}
+        for name, p in jobs[1:]:
+            if name in manual:
+                raw[name], quals[name] = manual[name], 1.0
+                contr[name] = 99.0
+                print(f"  {name}: РУЧНОЙ сдвиг {manual[name]:+.2f}с")
+                continue
+            # окно из разницы длительностей: рекордер на 2 мин длиннее не может
+            # отставать меньше чем на ~2 мин (плюс запас)
+            window = auto_window(ref_dur, file_dur(p), args.max_lag)
+            off, q, co = find_offset(envs["ref"], envs[name], rate, window)
+            if (q < TRUST_QUALITY and co < TRUST_CONTRAST) and window < 600:
+                # слабый пик: пробуем окно вдвое шире
+                off2, q2, co2 = find_offset(envs["ref"], envs[name], rate,
+                                            min(600.0, window * 2))
+                if co2 > co:
+                    off, q, co = off2, q2, co2
+                    print(f"  {name}: узкий поиск провален, взят широкий.")
+            raw[name], quals[name], contr[name] = round(off, 3), round(q, 3), round(co, 1)
+            bad = q < TRUST_QUALITY and co < TRUST_CONTRAST
+            if quals[name] == 0.0:
+                raw[name] = 0.0
+                print(f"  {name}: НЕ СВЕДЁН (в звуке нет общего сигнала). "
+                      f"Замерь сдвиг по хлопку и перезапусти с --set-offset {name}=N.")
+            print(f"  {name}: сдвиг {off:+.2f}с, качество {q:.2f}, контраст {co:.1f}"
+                  + ("  <-- ПРОВЕРЬ ВРУЧНУЮ" if bad else
+                     ("  (качество низкое от мусора в начале, но пик острый — скорее верно)"
+                      if q < TRUST_QUALITY else "")))
     base = min(0.0, min(raw.values()))
     offsets = {k: round(v - base, 3) for k, v in raw.items()}
-    # перекрёстная проверка: прямой сдвиг между микрофонами должен совпасть
-    # с разностью их сдвигов от опоры (ловушки периодики парные и разные)
-    if "mic_guest" in raw and "mic_host" in raw \
-            and "mic_guest" not in manual and "mic_host" not in manual:
-        gg, _ = envelope(read_wav(tmp / "mic_guest.wav"))
-        hh, _ = envelope(read_wav(tmp / "mic_host.wav"))
-        direct, _, cox = find_offset(gg, hh, rate, min(300.0, max(120.0, args.max_lag)))
-        if abs((raw["mic_guest"] - raw["mic_host"]) - direct) > MIC_MISMATCH_TOLERANCE:
-            print(f"  ВНИМАНИЕ: микрофоны не сходятся (через опору "
-                  f"{raw['mic_guest'] - raw['mic_host']:+.1f}с, напрямую {direct:+.1f}с). "
-                  f"СВЕРЬ ПО ХЛОПКУ, возьми ручные --set-offset.")
-            for k in ("mic_guest", "mic_host"):
-                quals[k] = min(quals[k], MIC_MISMATCH_QUALITY)
-                contr[k] = min(contr[k], MIC_MISMATCH_CONTRAST)
-        else:
-            print(f"  Перекрёстная проверка микрофонов сошлась ({direct:+.2f}с).")
-    if any(q < TRUST_QUALITY and contr.get(k, 0) < TRUST_CONTRAST
-           for k, q in quals.items()):
-        print("Слабые пики: СВЕРЬ сдвиги по хлопку! Если автомат врёт — перезапусти с ручными:")
-        print("  sync.py ... --set-offset mic_guest=2.5 --set-offset mic_host=3.1")
+    if global_offsets is not None:
+        print("Все дорожки согласованы между собой, сверять вручную не нужно.")
+    else:
+        # перекрёстная проверка: прямой сдвиг между микрофонами должен совпасть
+        # с разностью их сдвигов от опоры (ловушки периодики парные и разные)
+        if "mic_guest" in raw and "mic_host" in raw \
+                and "mic_guest" not in manual and "mic_host" not in manual:
+            gg, _ = envelope(read_wav(tmp / "mic_guest.wav"))
+            hh, _ = envelope(read_wav(tmp / "mic_host.wav"))
+            direct, _, cox = find_offset(gg, hh, rate,
+                                         min(300.0, max(120.0, args.max_lag)))
+            if abs((raw["mic_guest"] - raw["mic_host"]) - direct) > MIC_MISMATCH_TOLERANCE:
+                print(f"  ВНИМАНИЕ: микрофоны не сходятся (через опору "
+                      f"{raw['mic_guest'] - raw['mic_host']:+.1f}с, напрямую {direct:+.1f}с). "
+                      f"СВЕРЬ ПО ХЛОПКУ, возьми ручные --set-offset.")
+                for k in ("mic_guest", "mic_host"):
+                    quals[k] = min(quals[k], MIC_MISMATCH_QUALITY)
+                    contr[k] = min(contr[k], MIC_MISMATCH_CONTRAST)
+            else:
+                print(f"  Перекрёстная проверка микрофонов сошлась ({direct:+.2f}с).")
+        if any(q < TRUST_QUALITY and contr.get(k, 0) < TRUST_CONTRAST
+               for k, q in quals.items()):
+            print("Слабые пики: СВЕРЬ сдвиги по хлопку! Если автомат врёт — перезапусти с ручными:")
+            print("  sync.py ... --set-offset mic_guest=2.5 --set-offset mic_host=3.1")
 
     print("Добиваю до общего нуля...")
-    is_video = {"ref": True, "cam": bool(args.cam)}
     for name, p in jobs:
         if name.startswith("mic_"):
             pad_audio_to_zero(tmp / f"{name}.wav", offsets[name], out / f"{name}.wav")
         else:
             pad_video_to_zero(p, offsets[name], out / f"{name}.mp4",
-                              is_ref=(name == "ref"))
+                              is_ref=(name == "ref"), conform=conform)
     (out / "offsets.json").write_text(
         json.dumps({"offsets": offsets, "quality": quals, "contrast": contr,
-                    "note": "quality<0.3 при contrast>3 — нормально для рекордеров "
-                            "с шумным началом; всё равно сверь по хлопку"},
+                    "method": "global" if global_offsets is not None else "reference",
+                    "conform": conform,
+                    "note": "method=global — сдвиги согласованы по всем парам дорожек, "
+                            "хлопок не требовался и сверять вручную не нужно"},
                    ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"Готово: {out} (сдвиги {offsets})")
     print(f"Дальше: plugin/src/modes/interview.py --wide {out/'ref.mp4'} --guest-cam {out/'cam.mp4'} ...")
