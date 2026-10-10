@@ -32,6 +32,25 @@ import sys
 import wave
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
+import settings
+
+# Пороги доверия к найденному сдвигу — из config/settings.json, секция sync.
+# Пик считается слабым, если quality ниже порога И contrast ниже порога:
+# гул в начале записи даёт низкий quality, но острый пик — такой сдвиг
+# обычно верный, поэтому одного quality мало, чтобы объявить провал.
+TRUST_QUALITY = float(settings.get("sync.trust_quality", 0.3))
+TRUST_CONTRAST = float(settings.get("sync.trust_contrast", 3.0))
+# Микрофоны не сошлись через опору — срезаем доверие и предупреждаем
+MIC_MISMATCH_QUALITY = float(settings.get("sync.mic_mismatch_quality", 0.2))
+MIC_MISMATCH_CONTRAST = float(settings.get("sync.mic_mismatch_contrast", 2.0))
+MIC_MISMATCH_TOLERANCE = float(settings.get("sync.mic_cross_check_tolerance_sec", 1.0))
+# Окно итераций и блоков в многосекундных единицах
+VOTE_BLOCK_SEC = float(settings.get("sync.vote_block_sec", 60))
+REFINE_WINDOW_SEC = float(settings.get("sync.refine_window_sec", 3))
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -103,7 +122,7 @@ def _wcorr(a, b, lags):
     return out
 
 
-def find_offset(ref_env, other_env, rate: float = 50.0, max_lag: float = 60.0):
+def find_offset(ref_env, other_env, rate: float = 50.0, max_lag: float = None):
     """Сдвиг other относительно ref (сек; минус = other стартовал раньше).
     Возвращает (offset, quality, contrast).
     Метод: референс режем на блоки по 60с, каждый голосует за свой лучший
@@ -114,15 +133,17 @@ def find_offset(ref_env, other_env, rate: float = 50.0, max_lag: float = 60.0):
     это нормально). contrast — пик к фону (> 3 = остро). agree < 0.4
     (блоки не сошлись) — вердикту не верить, quality режется."""
     import numpy as np
+    if max_lag is None:
+        max_lag = float(settings.get("sync.max_lag_sec", 60.0))
     if np.all(ref_env == 0) or np.all(other_env == 0):
         return 0.0, 0.0, 0.0
 
-    ref_env = _winsor(ref_env, int(60 * rate))
-    other_env = _winsor(other_env, int(60 * rate))
+    ref_env = _winsor(ref_env, int(VOTE_BLOCK_SEC * rate))
+    other_env = _winsor(other_env, int(VOTE_BLOCK_SEC * rate))
 
     step = max(1, int(round(rate / 10)))
     rc, oc = ref_env[::step], other_env[::step]
-    blk = int(60 * rate / step)  # 60-секундные блоки референса
+    blk = int(VOTE_BLOCK_SEC * rate / step)  # блоки референса по 60 секунд
     maxc = int(max_lag * rate / step)
     lags_c = np.arange(-maxc, maxc + 1)
 
@@ -146,7 +167,7 @@ def find_offset(ref_env, other_env, rate: float = 50.0, max_lag: float = 60.0):
     lag_c = int((edges[bi] + edges[bi + 1]) / 2)
     agree = float(hist.max() / len(votes))
 
-    win = int(3 * rate)
+    win = int(REFINE_WINDOW_SEC * rate)
     lags_f = np.arange(int(lag_c * step) - win, int(lag_c * step) + win + 1)
     lags_f = lags_f[np.abs(lags_f) <= max_lag * rate]
     cf = _wcorr(ref_env, other_env, lags_f)
@@ -158,7 +179,7 @@ def find_offset(ref_env, other_env, rate: float = 50.0, max_lag: float = 60.0):
     quality = min(1.0, float(peak / denom))
     contrast = float(cf.max() / (np.median(np.abs(cf)) + 1e-9))
     if agree < 0.4:
-        quality = min(quality, 0.3)
+        quality = min(quality, TRUST_QUALITY)
     if abs(lag) > 0.98 * max_lag * rate:
         # пик на самом краю окна = артефакт окна, а не находка
         quality, contrast = 0.0, min(contrast, 1.0)
@@ -267,7 +288,9 @@ def main(argv=None) -> int:
     ap.add_argument("--mic-guest", default="", help="микрофон гостя")
     ap.add_argument("--mic-host", default="", help="микрофон ведущего")
     ap.add_argument("--outdir", default="synced", help="куда сложить синхрон")
-    ap.add_argument("--max-lag", type=float, default=60.0, help="макс. рассинхрон (сек)")
+    ap.add_argument("--max-lag", type=float,
+                    default=float(settings.get("sync.max_lag_sec", 60.0)),
+                    help="макс. рассинхрон (сек)")
     ap.add_argument("--set-offset", action="append", default=[],
                     help="ручной сдвиг вместо автопоиска: --set-offset mic_guest=2.5 "
                          "(имена: cam, mic_guest, mic_host; + = файл стартовал позже опоры). "
@@ -324,21 +347,22 @@ def main(argv=None) -> int:
         # отставать меньше чем на ~2 мин (плюс запас)
         window = auto_window(ref_dur, file_dur(p), args.max_lag)
         off, q, co = find_offset(envs["ref"], envs[name], rate, window)
-        if (q < 0.3 and co < 3) and window < 600:
+        if (q < TRUST_QUALITY and co < TRUST_CONTRAST) and window < 600:
             # слабый пик: пробуем окно вдвое шире
             off2, q2, co2 = find_offset(envs["ref"], envs[name], rate, min(600.0, window * 2))
             if co2 > co:
                 off, q, co = off2, q2, co2
                 print(f"  {name}: узкий поиск провален, взят широкий.")
         raw[name], quals[name], contr[name] = round(off, 3), round(q, 3), round(co, 1)
-        bad = q < 0.3 and co < 3
+        bad = q < TRUST_QUALITY and co < TRUST_CONTRAST
         if quals[name] == 0.0:
             raw[name] = 0.0
             print(f"  {name}: НЕ СВЕДЁН (в звуке нет общего сигнала). "
                   f"Замерь сдвиг по хлопку и перезапусти с --set-offset {name}=N.")
         print(f"  {name}: сдвиг {off:+.2f}с, качество {q:.2f}, контраст {co:.1f}"
               + ("  <-- ПРОВЕРЬ ВРУЧНУЮ" if bad else
-                 ("  (качество низкое от мусора в начале, но пик острый — скорее верно)" if q < 0.3 else "")))
+                 ("  (качество низкое от мусора в начале, но пик острый — скорее верно)"
+                   if q < TRUST_QUALITY else "")))
     base = min(0.0, min(raw.values()))
     offsets = {k: round(v - base, 3) for k, v in raw.items()}
     # перекрёстная проверка: прямой сдвиг между микрофонами должен совпасть
@@ -348,16 +372,17 @@ def main(argv=None) -> int:
         gg, _ = envelope(read_wav(tmp / "mic_guest.wav"))
         hh, _ = envelope(read_wav(tmp / "mic_host.wav"))
         direct, _, cox = find_offset(gg, hh, rate, min(300.0, max(120.0, args.max_lag)))
-        if abs((raw["mic_guest"] - raw["mic_host"]) - direct) > 1.0:
+        if abs((raw["mic_guest"] - raw["mic_host"]) - direct) > MIC_MISMATCH_TOLERANCE:
             print(f"  ВНИМАНИЕ: микрофоны не сходятся (через опору "
                   f"{raw['mic_guest'] - raw['mic_host']:+.1f}с, напрямую {direct:+.1f}с). "
                   f"СВЕРЬ ПО ХЛОПКУ, возьми ручные --set-offset.")
             for k in ("mic_guest", "mic_host"):
-                quals[k] = min(quals[k], 0.2)
-                contr[k] = min(contr[k], 2.0)
+                quals[k] = min(quals[k], MIC_MISMATCH_QUALITY)
+                contr[k] = min(contr[k], MIC_MISMATCH_CONTRAST)
         else:
             print(f"  Перекрёстная проверка микрофонов сошлась ({direct:+.2f}с).")
-    if any(q < 0.3 and contr.get(k, 0) < 3 for k, q in quals.items()):
+    if any(q < TRUST_QUALITY and contr.get(k, 0) < TRUST_CONTRAST
+           for k, q in quals.items()):
         print("Слабые пики: СВЕРЬ сдвиги по хлопку! Если автомат врёт — перезапусти с ручными:")
         print("  sync.py ... --set-offset mic_guest=2.5 --set-offset mic_host=3.1")
 

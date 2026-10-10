@@ -34,6 +34,8 @@ except Exception:
 
 import cv2
 
+import settings  # noqa: E402  — после bootstrap, регистрирующего src/ml
+
 import detect
 from detect import classify_by_pose
 from autocut import Clip, validate_sequence
@@ -41,8 +43,12 @@ from autocut import Clip, validate_sequence
 THUMB_W, THUMB_H, COLS = 320, 180, 6
 
 
-def scene_bounds(video: Path, threshold: float = 0.35, min_shot: float = 0.6):
+def scene_bounds(video: Path, threshold: float = None, min_shot: float = None):
     """Границы планов по детектору смен сцен ffmpeg. Возвращает [(t0,t1), ...]."""
+    if threshold is None:
+        threshold = float(settings.get("review.scene_threshold", 0.35))
+    if min_shot is None:
+        min_shot = float(settings.get("review.min_shot_sec", 0.6))
     proc = subprocess.run(
         ["ffmpeg", "-v", "info", "-i", str(video),
          "-vf", f"select='gt(scene,{threshold})',showinfo", "-f", "null", "-"],
@@ -100,8 +106,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="AutoCut Review — разбор готового ролика")
     ap.add_argument("--input", required=True, help="готовый ролик (mp4/mov/...)")
     ap.add_argument("--outdir", default="разбор", help="папка результата")
-    ap.add_argument("--threshold", type=float, default=0.35, help="чувствительность поиска склеек")
-    ap.add_argument("--conf", type=float, default=0.35, help="порог детекции людей")
+    ap.add_argument("--threshold", type=float,
+                    default=float(settings.get("review.scene_threshold", 0.35)),
+                    help="чувствительность поиска склеек")
+    ap.add_argument("--conf", type=float,
+                    default=float(settings.get("review.detect_conf", 0.35)),
+                    help="порог детекции людей")
     ap.add_argument("--model", default="yolov8n-pose.pt")
     ap.add_argument("--device", default="auto", help="auto|cpu|cuda (auto: GPU если завелась)")
     args = ap.parse_args(argv)

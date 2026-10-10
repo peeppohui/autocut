@@ -25,6 +25,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
+import settings
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -75,9 +80,15 @@ def main(argv=None) -> int:
     ap.add_argument("--duration", type=float, required=True, help="хронометраж секвенции (сек)")
     ap.add_argument("--duck", default="", help="speech.json из interview.py (дакинг под речь)")
     ap.add_argument("--out", default="bed.wav", help="выход (48кГц стерео wav)")
-    ap.add_argument("--bed-db", type=float, default=-20.0, help="уровень в паузах")
-    ap.add_argument("--duck-db", type=float, default=-32.0, help="уровень под речью")
-    ap.add_argument("--fade", type=float, default=2.0, help="фейды вх/вых (сек)")
+    ap.add_argument("--bed-db", type=float,
+                    default=float(settings.get("music.bed_db", -20.0)),
+                    help="уровень в паузах")
+    ap.add_argument("--duck-db", type=float,
+                    default=float(settings.get("music.duck_db", -32.0)),
+                    help="уровень под речью")
+    ap.add_argument("--fade", type=float,
+                    default=float(settings.get("music.fade_sec", 2.0)),
+                    help="фейды вх/вых (сек)")
     args = ap.parse_args(argv)
 
     music = Path(args.music)
