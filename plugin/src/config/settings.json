@@ -25,7 +25,8 @@
     "cover_len_sec": 1.6,
     "min_word_prob": 0.25,
     "ambiguous_db": 3.0,
-    "max_short_filler_sec": 0.4
+    "max_short_filler_sec": 0.4,
+    "mic_link_gap_sec": 0.3
   },
 
   "interview_cuts": {

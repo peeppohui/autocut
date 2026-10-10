@@ -46,7 +46,8 @@ from typing import List, Dict, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import bootstrap  # noqa: F401  — регистрирует src/core, src/ml и др. в sys.path
+import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
+import settings
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -76,7 +77,7 @@ PHRASE_FILLERS = [
     "так вот", "в общем", "в принципе", "честно говоря",
 ]
 SENT_START_DROP = {"ну", "вот", "так", "значит", "итак"}  # в начале предложения — выкидываем
-MAX_SHORT_FILLER = 0.4  # короткие паразиты длиннее — только с прикрытием/вручную
+MAX_SHORT_FILLER = float(settings.get("interview.max_short_filler_sec", 0.4))  # короткие паразиты длиннее — только с прикрытием/вручную
 
 # Мат и технический трёп: режем сразу (рыба, не финал — смысл не судим).
 # Точное совпадение целых слов (не префиксы: «художник» под «ху» не попадёт).
@@ -225,7 +226,8 @@ def _resolve_wordwise(kept_g, kept_h, audio_g, audio_h, sr=16000) -> int:
 
 def group_utterances(words_g: List[Word], words_h: List[Word],
                      audio_g, audio_h, sr: int = 16000,
-                     link_gap: float = 0.3, ambig_db: float = 3.0):
+                     link_gap: float = float(settings.get("interview.mic_link_gap_sec", 0.3)),
+                      ambig_db: float = float(settings.get("interview.ambiguous_db", 3.0))):
     """Склеивает пересекающиеся/близкие слова обоих микрофонов в реплики
     (зазор <= link_gap) и отдаёт КАЖДУЮ реплику целиком одному говорящему —
     тому, кто громче на всём её протяжении.
@@ -683,12 +685,16 @@ def main(argv=None) -> int:
     ap.add_argument("--input", default="", help="файл интервью (видео, одиночный режим)")
     ap.add_argument("--broll", default="", help="CSV перебивок из detect.py")
     ap.add_argument("--outdir", default="rz", help="папка результата")
-    ap.add_argument("--model", default="base", help="модель whisper: tiny/base/small")
-    ap.add_argument("--device", default="auto", help="auto|cpu|cuda (auto: GPU если завелась)")
-    ap.add_argument("--max-pause", type=float, default=0.6, help="паузы длиннее — ужать до этого")
-    ap.add_argument("--merge-gap", type=float, default=0.8, help="стык кусков при разрыве больше")
-    ap.add_argument("--min-keep", type=float, default=1.0, help="куски короче — выбросить")
-    ap.add_argument("--cover-len", type=float, default=1.6, help="длина вставки-перебивки")
+    ap.add_argument("--model", default=settings.get("interview.model", "base"), help="модель whisper: tiny/base/small")
+    ap.add_argument("--device", default=settings.get("interview.device", "auto"), help="auto|cpu|cuda (auto: GPU если завелась)")
+    ap.add_argument("--max-pause", type=float,
+                    default=float(settings.get("interview.max_pause_sec", 0.6)), help="паузы длиннее — ужать до этого")
+    ap.add_argument("--merge-gap", type=float,
+                    default=float(settings.get("interview.merge_gap_sec", 0.8)), help="стык кусков при разрыве больше")
+    ap.add_argument("--min-keep", type=float,
+                    default=float(settings.get("interview.min_keep_sec", 1.0)), help="куски короче — выбросить")
+    ap.add_argument("--cover-len", type=float,
+                    default=float(settings.get("interview.cover_len_sec", 1.6)), help="длина вставки-перебивки")
     ap.add_argument("--plan", default="средний1", help="план камеры интервью")
     ap.add_argument("--hero", default="гость", help="кто говорит")
     ap.add_argument("--wide", default="", help="МУЛЬТИКАМЕРА: общий план (ведущий+гость, синхрон)")
@@ -697,9 +703,11 @@ def main(argv=None) -> int:
     ap.add_argument("--host-mic", default="", help="МУЛЬТИКАМЕРА: микрофон ведущего (синхрон)")
     ap.add_argument("--wide-plan", default="общий", help="план широкой камеры")
     ap.add_argument("--guest-plan", default="средний1", help="план камеры гостя")
-    ap.add_argument("--min-prob", type=float, default=0.25,
+    ap.add_argument("--min-prob", type=float,
+                    default=float(settings.get("interview.min_word_prob", 0.25)),
                     help="слова с уверенностью ниже — вон (проникновение/гул)")
-    ap.add_argument("--ambig-db", type=float, default=3.0,
+    ap.add_argument("--ambig-db", type=float,
+                    default=float(settings.get("interview.ambiguous_db", 3.0)),
                     help="микрофоны слышат с разницей меньше — пометить [~]")
     ap.add_argument("--transcript-only", action="store_true",
                     help="только транскрипт с номерами (правка текста до сборки)")
