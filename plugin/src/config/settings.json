@@ -1,0 +1,129 @@
+{
+  "_readme": [
+    "AutoCut — единый файл порогов и правил. Значения здесь — выписка из текущих",
+    "констант кода на момент M0. В M1 модули начнут читать отсюда вместо хардкодов.",
+    "До M1 этот файл НИЧЕГО не читается: правка значений пока ни на что не влияет.",
+    "Правь только числа. Структуру не меняй — её читает код."
+  ],
+
+  "project": {
+    "_note": "Режим таймкода проекта. drop_frame=false для 25 fps и для 29.97 NDF.",
+    "fps": 25,
+    "drop_frame": false,
+    "width": 1920,
+    "height": 1080,
+    "sequence_name": "AutoCut"
+  },
+
+  "interview": {
+    "_note": "src/modes/interview.py — чистка речи и сборка рыбы.",
+    "model": "base",
+    "device": "auto",
+    "max_pause_sec": 0.6,
+    "merge_gap_sec": 0.8,
+    "min_keep_sec": 1.0,
+    "cover_len_sec": 1.6,
+    "min_word_prob": 0.25,
+    "ambiguous_db": 3.0,
+    "max_short_filler_sec": 0.4
+  },
+
+  "interview_cuts": {
+    "_note": "Правила монтажа 2-камерного интервью (из ТЗ). Реализуются в M3.",
+    "silence_switch_ms": 300,
+    "topic_change_ms": 800,
+    "shot_min_sec": 2.0,
+    "shot_optimal_min_sec": 4.0,
+    "shot_optimal_max_sec": 7.0,
+    "shot_max_sec": 12.0,
+    "cam_a_share": 0.7,
+    "cam_b_share": 0.3,
+    "forbid_jump_cut": true,
+    "forbid_cut_inside_word": true,
+    "require_cutaway_on_jump": true
+  },
+
+  "digest": {
+    "_note": "src/modes/autocut.py — раскладка кадров по крупности.",
+    "rec_duration_sec": {
+      "деталь": [1.5, 3.0],
+      "крупный": [2.0, 4.0],
+      "средний1": [2.5, 5.0],
+      "средний2": [3.0, 6.0],
+      "общий": [4.0, 8.0],
+      "дальний": [4.0, 8.0]
+    },
+    "duration_over_tolerance_sec": 2.0,
+    "max_same_plan_run": 3,
+    "digest_finale_wide": true,
+    "digest_open_wide": true,
+    "target_sec": 60,
+    "structure": {
+      "hook_pct": 10,
+      "body_pct": 80,
+      "outro_pct": 100
+    },
+    "kuleshov_lite": true,
+    "order_seed": 42,
+    "two_opt_iterations": 2000
+  },
+
+  "detect": {
+    "_note": "src/ml/detect.py — эвристика определения крупности по YOLOv8-pose.",
+    "model": "yolov8n-pose.pt",
+    "frames_per_file": 7,
+    "detect_conf": 0.35,
+    "kpt_conf": 0.3,
+    "face_w_detail": 0.28,
+    "face_w_closeup": 0.13,
+    "person_h_distant": 0.28,
+    "person_h_general": 0.85,
+    "person_min_body": 0.4,
+    "crowd_people_min": 5,
+    "crowd_body_max": 0.5,
+    "crowd_back_people_min": 4,
+    "low_confidence": 0.65,
+    "min_visible_keypoints": 5
+  },
+
+  "sync": {
+    "_note": "src/ml/sync.py — сведение камер и микрофонов по звуку.",
+    "max_lag_sec": 60.0,
+    "envelope_rate_hz": 50,
+    "vote_block_sec": 60,
+    "refine_window_sec": 3,
+    "trust_quality": 0.3,
+    "trust_contrast": 3.0,
+    "mic_cross_check_tolerance_sec": 1.0
+  },
+
+  "music": {
+    "_note": "src/ml/music.py — подложка с дакингом по речи.",
+    "bed_db": -20.0,
+    "duck_db": -32.0,
+    "fade_sec": 2.0,
+    "sample_rate": 48000,
+    "channels": 2
+  },
+
+  "review": {
+    "_note": "src/modes/review.py — разбор готового ролика.",
+    "scene_threshold": 0.35,
+    "min_shot_sec": 0.6,
+    "detect_conf": 0.35,
+    "low_confidence": 0.65
+  },
+
+  "export": {
+    "_note": "src/io — экспорт в Premiere.",
+    "fps": 25,
+    "width": 1920,
+    "height": 1080,
+    "audio_depth": 16,
+    "audio_sample_rate": 48000,
+    "audio_channels": 2,
+    "color_depth": 24,
+    "trim_to_plan": true,
+    "write_edl": true
+  }
+}
