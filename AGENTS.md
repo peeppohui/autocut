@@ -75,3 +75,21 @@ python -m src.io.premiere --timeline "$d\rz\selects.csv" --out "$d\ryba.xml" --e
 
 - Комментарии и тексты для пользователя — по-русски.
 - Комментарий объясняет **почему**, а не пересказывает код.
+
+## Переводы строк
+
+В репозитории везде **LF**, `core.autocrlf=false`. Если переписать файл
+скриптом на Python, он молча станет CRLF — git покажет весь файл как
+изменённый (тысячи строк шума вместо правки). Переписывать файлы только
+через инструменты редактирования, либо после скрипта вернуть LF:
+
+```powershell
+$p = "plugin\src\modes\interview.py"
+$b = [IO.File]::ReadAllBytes($p)
+$out = New-Object System.Collections.Generic.List[byte]
+for ($i=0; $i -lt $b.Length; $i++) {
+  if ($b[$i] -eq 13 -and $i -lt $b.Length-1 -and $b[$i+1] -eq 10) { continue }
+  $out.Add($b[$i])
+}
+[IO.File]::WriteAllBytes($p, $out.ToArray())
+```
