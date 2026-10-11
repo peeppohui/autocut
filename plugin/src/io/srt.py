@@ -33,7 +33,7 @@ import settings
 
 # Метки, которые interview.py ставит в desc: [?] короткий кусок,
 # [~] спорный по микрофонам. В субтитрах они лишние.
-FLAG_RX = re.compile(r"^\s*[\[~?\]]+\s*")
+FLAG_RX = re.compile(r"^\s*(?:\[[~?!]+\]|~|\?)\s*")
 SPEAKER_RX = re.compile(r"^\s*(ГОСТЬ|ВЕДУЩИЙ|ГOST|HOST)\s*:\s*", re.IGNORECASE)
 
 # Служебные подписи таймлайна: попадают в desc, но не являются речью.
@@ -59,10 +59,16 @@ def fmt_time(seconds: float) -> str:
 
 
 def clean_text(text: str, drop_speaker: bool = True) -> str:
-    """Убирает служебные метки и имя спикера."""
-    t = FLAG_RX.sub("", text or "").strip()
+    """Убирает служебные метки и имя спикера.
+
+    Сначала имя спикера, потом метку: в колонке desc метка стоит ПОСЛЕ
+    имени ("ГОСТЬ: [!] текст"), и при обратном порядке она доходила
+    до субтитров вместе с закрывающей скобкой.
+    """
+    t = (text or "").strip()
     if drop_speaker:
         t = SPEAKER_RX.sub("", t)
+    t = FLAG_RX.sub("", t).strip()
     return re.sub(r"\s+", " ", t).strip()
 
 

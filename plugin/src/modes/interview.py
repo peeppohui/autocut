@@ -105,7 +105,7 @@ def load_mute_list() -> set:
 
 
 class Word:
-    __slots__ = ("w", "start", "end", "drop", "why", "prob")
+    __slots__ = ("w", "start", "end", "drop", "why", "prob", "unsure")
     def __init__(self, w, start, end, prob=1.0):
         self.w = w
         self.start = float(start)
@@ -113,6 +113,9 @@ class Word:
         self.drop = False
         self.why = ""
         self.prob = float(prob if prob is not None else 1.0)
+        # неуверенность модели != мусор: слово оставляем в монтаже,
+        # но помечаем, чтобы человек решил сам
+        self.unsure = False
 
 
 def norm(w: str) -> str:
@@ -291,25 +294,50 @@ def build_multicam_chunks(words_g: List[Word], words_h: List[Word],
             if gap > max_pause and sp == cur[2]:
                 cut_pauses += gap - max_pause
             if cur[1] - cur[0] >= min_keep and not _close_lone(cur[3]):
-                chunks.append((cur[0], cur[1], cur[2], " ".join(x.w for x in cur[3])))
+                chunks.append((cur[0], cur[1], cur[2], chunk_text(cur[3])))
             cur = [s, e, sp, [w]]
         else:
             cur[3].append(w)
             cur[1] = e
     if cur is not None and cur[1] - cur[0] >= min_keep and not _close_lone(cur[3]):
-        chunks.append((cur[0], cur[1], cur[2], " ".join(x.w for x in cur[3])))
+        chunks.append((cur[0], cur[1], cur[2], chunk_text(cur[3])))
     return chunks, cut_pauses
 
 
-def drop_lowprob(words: List[Word], min_prob: float) -> int:
-    """Слова, в которых модель не уверена (проникновение в чужой микрофон,
-    гул, галлюцинации на шуме). Возвращает число снятых."""
-    n = 0
+UNSURE_FLAG = "[!]"
+
+
+def mark_unsure(words: List[Word], min_prob: float,
+                min_hopeless: float = 0.05) -> int:
+    """Помечает слова, в которых модель не уверена.
+
+    Раньше такие слова просто выкидывались, и на выходе монтаж молча
+    терял речь: человек слышал, что часть фразы съедена, и не мог
+    понять где. Уверенность модели - не доказательство мусора: она
+    падает на акценте, наложении голосов и шуме.
+
+    Теперь слово остаётся в монтаже с пометкой [!], а убрать его можно
+    префиксом '-' в transcript.txt. Совсем безнадёжные (prob ниже
+    min_hopeless) - это обычно галлюцинации на тишине, их снимаем.
+    Возвращает (помечено, снято).
+    """
+    marked = hopeless = 0
     for w in words:
-        if not w.drop and w.prob < min_prob:
-            w.drop, w.why = True, f"неуверенно ({w.prob:.2f})"
-            n += 1
-    return n
+        if w.drop or w.prob >= min_prob:
+            continue
+        if w.prob < min_hopeless:
+            w.drop, w.why = True, f"галлюцинация ({w.prob:.2f})"
+            hopeless += 1
+        else:
+            w.unsure = True
+            marked += 1
+    return marked, hopeless
+
+
+def chunk_text(words) -> str:
+    """Текст куска; если внутри есть неуверенное слово - с пометкой [!]."""
+    text = " ".join(x.w for x in words)
+    return UNSURE_FLAG + " " + text if any(x.unsure for x in words) else text
 
 
 def mark_trash(words: List[Word]):
@@ -400,7 +428,7 @@ def build_keeps(words: List[Word], max_pause: float, merge_gap: float,
         if gap > merge_gap:
             # закрываем кусок
             if prev_end - cur_in >= min_keep and not _close_lone(cur_words):
-                chunks.append((cur_in, prev_end, " ".join(x.w for x in cur_words)))
+                chunks.append((cur_in, prev_end, chunk_text(cur_words)))
             elif chunks:
                 pass  # крошку < min_keep выбрасываем (слово-паразит уровня фразы)
             cur_in, cur_words = w.start, [w]
@@ -408,7 +436,7 @@ def build_keeps(words: List[Word], max_pause: float, merge_gap: float,
             cur_words.append(w)
         prev_end = w.end
     if cur_in is not None and prev_end - cur_in >= min_keep and not _close_lone(cur_words):
-        chunks.append((cur_in, prev_end, " ".join(x.w for x in cur_words)))
+        chunks.append((cur_in, prev_end, chunk_text(cur_words)))
     return chunks, cut_pauses
 
 
@@ -618,7 +646,9 @@ def run_multicam(args) -> int:
         return 1
 
     print("3/5 Мусор, паузы, дележка перекрытий...")
-    n_low = drop_lowprob(words_g + words_h, args.min_prob)
+    n_low, n_hopeless = mark_unsure(
+        words_g + words_h, args.min_prob,
+        float(settings.get("interview.hopeless_prob", 0.05)))
     auto_g, cover_g, man_g = mark_trash(words_g)
     auto_h, cover_h, man_h = mark_trash(words_h)
     kept_g = [w for w in words_g if not w.drop]
@@ -635,6 +665,8 @@ def run_multicam(args) -> int:
     # фразовый мусор: с прикрытием режем, без — в ручной список
     broll = load_broll(Path(args.broll)) if args.broll else []
     covered, left_manual = [], [(w, "гость") for w in man_g] + [(w, "ведущий") for w in man_h]
+    unsure_list = ([(w, "гость") for w in words_g if w.unsure] +
+                   [(w, "ведущий") for w in words_h if w.unsure])
     for w in cover_g + cover_h:
         if w.drop:
             continue
@@ -715,7 +747,8 @@ def run_multicam(args) -> int:
         f"Рыба интервью (мультикамера): {wide.name} + {gcam.name}",
         f"Гость: {tg:.1f}с, ведущий: {th:.1f}с. Кусков: {len(chunks)}.",
         f"Дублей в чужом микрофоне снято: {n_over}. Огрызков (слов-одиночек): {n_lone}.",
-        f"Неуверенных слов (< {args.min_prob}): {n_low}.",
+        f"Помечено неуверенных слов [{UNSURE_FLAG}] (< {args.min_prob}): "
+        f"{n_low}. Снято галлюцинаций: {n_hopeless}.",
         f"Пауз ужато: {cut_pauses:.1f}с.",
         f"Паразитов сразу: {len(auto_g) + len(auto_h)}. Фраз под перебивкой: {len(covered)}.",
         f"Стыков прикрыто: {n_joints if broll else 0} из {n_joints}."
@@ -728,6 +761,10 @@ def run_multicam(args) -> int:
         "",
         "ВРУЧНУЮ:",
         *[f"  {w.start:.1f}с [{sp}] «{w.w}»" for w, sp in left_manual[:40]],
+        "",
+        "НЕУВЕРЕННЫЕ СЛОВА (модель сомневалась, но слово оставлено в монтаже):",
+        *([f"  {w.start:7.1f}с [{sp}] p={w.prob:.2f} «{w.w}»"
+           for w, sp in unsure_list[:40]] or ["  нет"]),
         "",
         "Точнее всего — правка текста: вычеркни строки с '-' в transcript.txt и собери заново:",
         f"  interview.py --wide {wide} --guest-cam {gcam} --outdir {out} "
@@ -802,7 +839,8 @@ def main(argv=None) -> int:
         return 1
 
     print("3/5 Мусор и паузы...")
-    drop_lowprob(words, args.min_prob)
+    mark_unsure(words, args.min_prob,
+                float(settings.get("interview.hopeless_prob", 0.05)))
     auto_drop, need_cover, manual = mark_trash(words)
     chunks, cut_pauses = build_keeps(words, args.max_pause, args.merge_gap, args.min_keep)
 

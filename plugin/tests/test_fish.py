@@ -5,7 +5,7 @@ import bootstrap  # noqa: F401  — регистрирует все модуль
 import numpy as np
 from interview import (Word, group_utterances, build_multicam_chunks,
                        load_edited_transcript, _lone_trash, KEEP_ONE,
-                       drop_lowprob, mark_trash)
+                       mark_unsure, chunk_text, mark_trash)
 from pathlib import Path
 
 SR = 16000
@@ -98,9 +98,21 @@ killed = {w.w for w in auto}
 assert "бля" in killed and "художник" not in killed, killed
 print("T7 mute OK:", sorted(killed))
 
-# 8. неуверенные слова (проникновение) падают по prob
+# 8. неуверенные слова НЕ выкидываются, а помечаются: уверенность
+#    модели не доказательство мусора, и монтаж молча терял речь.
 wl = [Word("громко", 0, .5, 0.9), Word("бубнёж", .6, 1.0, 0.1)]
-assert drop_lowprob(wl, 0.25) == 1 and wl[1].drop and not wl[0].drop
+marked, hopeless = mark_unsure(wl, 0.25, 0.05)
+assert marked == 1 and wl[1].unsure and not wl[1].drop and not wl[0].unsure
+assert hopeless == 0
+# кусок с неуверенным словом получает пометку [!] в тексте
+t_txt = chunk_text(wl)
+assert t_txt.startswith("[!]") and "бубнёж" in t_txt, t_txt
+# кусок без сомнений остаётся чистым
+assert chunk_text([Word("громко", 0, .5, 0.9)]) == "громко"
+# совсем безнадёжное (prob ниже пола) - галлюцинация, снимаем
+wh = [Word("призрак", 0, .5, 0.01)]
+m2, h2 = mark_unsure(wh, 0.25, 0.05)
+assert m2 == 0 and h2 == 1 and wh[0].drop, (m2, h2)
 print("T8 lowprob OK")
 
 # 9. равные микрофоны -> спорный интервал, но победитель всё равно есть
