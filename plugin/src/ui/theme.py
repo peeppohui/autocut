@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from pathlib import Path
 
 import customtkinter as ctk
 
@@ -167,3 +168,48 @@ def sidebar_item(side, text, command, active=False):
 def group_label(side, text):
     return ctk.CTkLabel(side, text=text.upper(), text_color=FAINT, anchor="w",
                         font=font(10, "bold"))
+
+
+# ---------------------------------------------------------------- логотип
+ASSETS = Path(__file__).resolve().parent / "assets"
+# ссылки на картинки держим здесь: если не сохранить, сборщик мусора
+# уберёт объект и в виджете останется пустое место
+_keep = []
+
+
+def _photo(path: Path, width: int):
+    if not path.is_file():
+        return None
+    try:
+        img = tk.PhotoImage(file=str(path))
+    except Exception:
+        return None
+    if img.width() > width:
+        img = img.subsample(max(1, img.width() // width))
+    _keep.append(img)
+    return img
+
+
+def logo(width: int = 140):
+    """Знак с надписью — в шапку боковой панели.
+
+    Размеры в theme.py и в make_logo.py связаны: файл делаем вдвое
+    больше, чем показываем, иначе subsample округлит вниз и размер
+    разъедется с ожидаемым.
+    """
+    return _photo(ASSETS / "autocut_logo.png", width)
+
+
+def mark(width: int = 64):
+    """Только знак — в иконку окна."""
+    return _photo(ASSETS / "autocut_mark.png", width)
+
+
+def apply_icon(win, width: int = 64):
+    """Иконка окна. Без файла остаётся стандартная — это не поломка."""
+    img = mark(width)
+    if img is not None:
+        try:
+            win.iconphoto(True, img)
+        except Exception:
+            pass

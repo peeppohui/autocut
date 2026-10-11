@@ -6,9 +6,9 @@ AutoCut — окно сбора рыбы. Терминал больше не н�
 
 Слева список шаблонов: сначала те, что нужны каждый день, потом
 остальные. Логика запуска шагов и отмены не менялась с прошлой
-версии на ttk - перенесено только оформление.
+версии на ttk — перенесено только оформление.
 
-Все элементы берутся из ui/theme.py. Если добавляешь поле - бери
+Все элементы берутся из ui/theme.py. Если добавляешь поле — бери
 field/card/switch оттуда, иначе окно начнёт выглядеть собранным
 из двух разных программ.
 """
@@ -96,10 +96,6 @@ def kill_tree(p):
 
 
 class App(ctk.CTk):
-    # Шаблоны: (группа, название, функция). Новый режим добавляется
-    # одной функцией и одной строкой сюда.
-    SUBS = {}
-
     def __init__(self):
         super().__init__()
         self.title("AutoCut")
@@ -111,6 +107,7 @@ class App(ctk.CTk):
 
         self.q = queue.Queue()
         self.busy = False
+        # не self.state: так называется метод Tk, и словарь его затирал
         self.run_state = {"proc": None, "cancel": False}
         self.result_dir = None
         # просят две кнопки на странице интервью, держим одну переменную
@@ -122,9 +119,16 @@ class App(ctk.CTk):
                             width=236)
         side.grid(row=0, column=0, sticky="ns")
         side.grid_propagate(False)
-        ctk.CTkLabel(side, text="AutoCut", text_color=T.TEXT, anchor="w",
-                     font=T.font(21, "bold")).pack(anchor="w", padx=T.PAD,
-                                                   pady=(24, 22))
+        # логотип; если файла нет — просто текст, это не поломка
+        pic = T.logo(140)
+        if pic is not None:
+            ctk.CTkLabel(side, text="", image=pic).pack(
+                anchor="w", padx=(T.PAD - 8, 0), pady=(20, 14))
+        else:
+            ctk.CTkLabel(side, text="AutoCut", text_color=T.TEXT, anchor="w",
+                         font=T.font(21, "bold")).pack(anchor="w", padx=T.PAD,
+                                                       pady=(24, 22))
+        T.apply_icon(self)
         for gname, items in GROUPS:
             T.group_label(side, gname).pack(anchor="w", padx=T.PAD,
                                             pady=(8, 4))
@@ -185,7 +189,7 @@ class App(ctk.CTk):
         for n, b in self._nav.items():
             b.configure(fg_color=T.RAISED if n == name else "transparent",
                         text_color=T.TEXT if n == name else T.MUTED)
-        page = next(f for _, n, f in TPL if n == name)
+        page = next(f for n, f in TPL if n == name)
         page(self.host, self).grid(row=0, column=0, sticky="nsew")
 
     # ---------- лог и поток ----------
@@ -286,8 +290,7 @@ def page_multi(parent, app):
 
     opt = T.card(wrap, "Монтаж")
     tgt = ctk.StringVar()
-    T.field(opt, 0, "Хронометраж (ММ:СС)", tgt,
-            "пусто — не ограничивать", width=180)
+    T.field(opt, 0, "Хронометраж (ММ:СС)", tgt, "пусто — не ограничивать")
     two_cam = T.switch(opt, 1, "Второй ракурс на отдельной дорожке",
                        ctk.BooleanVar(value=True),
                        "Premiere не понимает multiclip — две дорожки работают "
@@ -309,6 +312,29 @@ def page_multi(parent, app):
     def tgt_args():
         v = tgt.get().strip()
         return ["--target", v] if v else []
+
+    def run_from_tx():
+        t = app.transcript_path.get().strip().strip('"')
+        if not t or not Path(t).is_file():
+            messagebox.showwarning("AutoCut", "Укажи правленый transcript.txt")
+            return
+        w, g = app.need(wide, "общий план"), app.need(gcam, "камеру гостя")
+        if not w or not g:
+            return
+        o = out.get().strip().strip('"') or str(BASE / "interview_out")
+        Path(o).mkdir(parents=True, exist_ok=True)
+        app.go([
+            ("1. Сборка из правленого текста",
+             [str(MODES / "interview.py"), "--wide", w, "--guest-cam", g,
+              "--outdir", f"{o}/rz", "--from-transcript", t] + tgt_args()),
+            ("2. XML для Premiere",
+             [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv",
+              "--media-dir", o, "--out", f"{o}/ryba.xml",
+              "--edl", f"{o}/ryba.edl", "--trim-rec"]
+             + (["--stacked"] if two_cam.get() else [])),
+            ("3. Субтитры",
+             [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
+              "--out", f"{o}/ryba.srt"])], o)
 
     def run():
         paths = {}
@@ -357,36 +383,13 @@ def page_multi(parent, app):
     T.btn(row, "Собрать рыбу", "primary", width=180, command=run).pack(
         side="left")
     T.btn(row, "Собрать из правленого текста", "ghost",
-          command=lambda: run_from_tx()).pack(side="left", padx=10)
-
-    def run_from_tx():
-        t = app.transcript_path.get().strip().strip('"')
-        if not t or not Path(t).is_file():
-            messagebox.showwarning("AutoCut", "Укажи правленый transcript.txt")
-            return
-        w, g = app.need(wide, "общий план"), app.need(gcam, "камеру гостя")
-        if not w or not g:
-            return
-        o = out.get().strip().strip('"') or str(BASE / "interview_out")
-        Path(o).mkdir(parents=True, exist_ok=True)
-        app.go([
-            ("1. Сборка из правленого текста",
-             [str(MODES / "interview.py"), "--wide", w, "--guest-cam", g,
-              "--outdir", f"{o}/rz", "--from-transcript", t] + tgt_args()),
-            ("2. XML для Premiere",
-             [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv",
-              "--media-dir", o, "--out", f"{o}/ryba.xml",
-              "--edl", f"{o}/ryba.edl", "--trim-rec"]
-             + (["--stacked"] if two_cam.get() else [])),
-            ("3. Субтитры",
-             [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
-              "--out", f"{o}/ryba.srt"])], o)
+          command=run_from_tx).pack(side="left", padx=10)
     return wrap
 
 
 def page_preview(parent, app):
     """Контактный лист рыбы: кадр каждого куска и кто говорит."""
-    wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+    wrap = ctk.CTkFrame(parent, fg_color="transparent")
 
     src = T.card(wrap, "Рыба", "Укажи selects.csv или папку проекта")
     sel = ctk.StringVar()
@@ -396,10 +399,8 @@ def page_preview(parent, app):
                         font=T.font(12))
     info.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
-    grid_box = ctk.CTkFrame(wrap, fg_color="transparent")
-    grid_box.pack(fill="both", expand=True, padx=T.PAD, pady=(0, T.PAD))
-    grid = ctk.CTkScrollableFrame(grid_box, fg_color="transparent")
-    grid.pack(fill="both", expand=True)
+    grid = ctk.CTkScrollableFrame(wrap, fg_color="transparent")
+    grid.pack(fill="both", expand=True, padx=T.PAD, pady=(0, T.PAD))
     for c in range(4):
         grid.grid_columnconfigure(c, weight=1, uniform="t")
 
@@ -428,7 +429,8 @@ def page_preview(parent, app):
             th = r.get("thumb")
             if th and Path(th).is_file():
                 img = tk.PhotoImage(file=th)
-                keep.append(img)      # без ссылки сборщик уберёт картинку
+                img = img.subsample(2, 2)   # превью уже 384 -> 192
+                keep.append(img)           # без ссылки сборщик уберёт
                 ctk.CTkLabel(cell, text="", image=img, height=92,
                              corner_radius=6).pack(fill="x", padx=8,
                                                     pady=(8, 4))
@@ -450,15 +452,21 @@ def page_preview(parent, app):
     def open_preview():
         p = Path(sel.get().strip().strip('"'))
         if p.is_dir():
-            p = p.parent / "rz" / "selects.csv"
+            p = p / "rz" / "selects.csv"
         if not p.is_file():
             messagebox.showwarning("AutoCut", "Сначала укажи selects.csv")
             return
         out_mp4 = p.parent.parent / "preview.mp4"
+
+        def open_when_ready():
+            if out_mp4.is_file():
+                try:
+                    os.startfile(out_mp4)
+                except Exception:
+                    pass
         app.go([("Сборка превью", [str(IO / "preview.py"), "--selects", str(p),
                                    "--out", str(out_mp4)])], str(p.parent))
-        app.after(200, lambda: (os.startfile(out_mp4)
-                                if out_mp4.is_file() else None))
+        app.after(400, open_when_ready)
 
     row = ctk.CTkFrame(wrap, fg_color="transparent")
     row.pack(fill="x", padx=T.PAD, pady=(0, T.PAD))
@@ -524,7 +532,7 @@ def page_settings(parent, app):
             v = var.get()
             settings.set_value(key, round(float(v), 3)
                                if isinstance(v, float) else v)
-        note.configure(text=f"Сохранено в settings.json, {len(FIELDS)} значений")
+        note.configure(text=f"Сохранено в settings.json, {FIELDS} значений")
         note.after(4000, lambda: note.configure(text=""))
 
     T.btn(wrap, "Сохранить настройки", "primary", width=200,
@@ -643,7 +651,7 @@ def page_review(parent, app):
 
 
 def page_log(parent, app):
-    """Пустая заглушка: лог и так висит внизу окна постоянно."""
+    """Заглушка: лог и так висит внизу окна постоянно."""
     wrap = ctk.CTkFrame(parent, fg_color="transparent")
     ctk.CTkLabel(wrap, text="Ход работы — внизу окна.\n\n"
                             "Пока идёт сборка, не закрывай AutoCut: "
@@ -664,22 +672,27 @@ SUBS = {
 }
 
 TPL = [
-    ("Интервью 2 камеры", "Интервью 2 камеры", page_multi),
-    ("Просмотр", "Просмотр", page_preview),
-    ("Настройки", "Настройки", page_settings),
-    ("Ход работы", "Ход работы", page_log),
-    ("Дайджест", "Дайджест", page_digest),
-    ("Интервью 1 видео", "Интервью 1 видео", page_single),
-    ("Проверка готового", "Проверка готового", page_review),
+    ("Интервью 2 камеры", page_multi),
+    ("Просмотр", page_preview),
+    ("Настройки", page_settings),
+    ("Ход работы", page_log),
+    ("Дайджест", page_digest),
+    ("Интервью 1 видео", page_single),
+    ("Проверка готового", page_review),
 ]
 
+# Слева: сначала то, чем пользуешься каждый день, потом остальное.
 GROUPS = [
-    ("Основное", [(n, f) for _, n, f in TPL[:4]]),
-    ("Другие шаблоны", [(n, f) for _, n, f in TPL[4:]]),
+    ("Основное", [("Интервью 2 камеры", page_multi),
+                  ("Просмотр", page_preview),
+                  ("Настройки", page_settings),
+                  ("Ход работы", page_log)]),
+    ("Другие шаблоны", [("Дайджест", page_digest),
+                        ("Интервью 1 видео", page_single),
+                        ("Проверка готового", page_review)]),
 ]
 
 FIELDS = 8
-
 
 if __name__ == "__main__":
     App().mainloop()
