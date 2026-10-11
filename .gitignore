@@ -55,3 +55,4 @@ shots*/
 # Временные файлы сборки превью
 plugin/src/io/_ffconcat.tmp
 _preview_tmp/
+plugin/src/ui/assets/_check_*.png
