@@ -165,6 +165,23 @@ with tempfile.TemporaryDirectory() as td:
        all(c.find("file") is not None for c in t2))
 
     # =========================================================
+    # Маркеры лежат на уровне секвенции. Внутри <clipitem> DTD их
+    # разрешает, но Premiere оттуда не показывает - панель Markers
+    # оставалась пустой, а с маркерами видно, почему склеено.
+    # =========================================================
+    mks = st.findall("sequence/marker")
+    ok("маркеры на уровне секвенции", len(mks) == len(clips), str(len(mks)))
+    ok("внутри клипов маркеров не осталось",
+       not st.findall(".//clipitem/marker"))
+    ok("у маркера есть имя и текст",
+       bool(mks[0].findtext("name")) and bool(mks[0].findtext("comment")),
+       f"{mks[0].findtext('name')} / {mks[0].findtext('comment')}")
+    ok("у маркера есть таймкод", bool(mks[0].findtext("in")), "")
+    ok("маркеров нет без --no-markers",
+       not premiere.build_fcp7(list(clips), fps=25, stacked=True,
+                               markers=False).findall("sequence/marker"))
+
+    # =========================================================
     # Раздельные микрофоны: каждому источнику звука своя дорожка.
     # Раньше все клипы делили одну A1, и ведущий с гостем в постпродакшне
     # были неразделимы.

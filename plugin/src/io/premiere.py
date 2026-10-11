@@ -412,6 +412,7 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         extra_tracks.append(tr)
 
     t = 0
+    seq_markers = []
     for i, c in enumerate(clips, 1):
         orig, src_in, src_out, d = c["_orig"], c["_in"], c["_out"], c["_used"]
         start, end = t, t + d
@@ -500,13 +501,11 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             ET.SubElement(logging, "lognote").text = note
 
             # маркер на начало куска: план, герой и причина склейки.
-            # Premiere покажет их в панели маркеров - сразу видно, почему склеено.
+            # Копим, а не пишем сюда: Premiere маркеры внутри clipitem
+            # показывал пустой панелью. На уровне секвенции попадают
+            # в панель Markers сразу - видно, почему склеено.
             if markers:
-                mk = ET.SubElement(vi, "marker")
-                ET.SubElement(mk, "name").text = f"{c['plan'] or '-'} / {c['hero'] or '-'}"
-                ET.SubElement(mk, "comment").text = c["desc"] or c["file"]
-                ET.SubElement(mk, "in").text = tc(start, fps)
-                ET.SubElement(mk, "out").text = tc(start, fps)
+                seq_markers.append((start, c))
 
         # audio clipitem: звук либо из видеофайла, либо из отдельного
         # микрофона (колонка audio из interview.py) — тогда в A1 сразу чистый звук
@@ -554,6 +553,16 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         ET.SubElement(mi, "out").text = str(total)
         mi.append(_audio_file_el(f"file-ax{k}", mc, total, fps))
         ET.SubElement(mi, "sourcetrack").append(_audio_track_el())
+
+    # Маркеры - на уровне секвенции, после <media>. DTD разрешает маркер
+    # и внутри клипа, но Premiere оттуда их не показывает: панель
+    # Markers оставалась пустой.
+    for start, c in seq_markers:
+        mk = ET.SubElement(seq, "marker")
+        ET.SubElement(mk, "name").text = f"{c['plan'] or '-'} / {c['hero'] or '-'}"
+        ET.SubElement(mk, "comment").text = c["desc"] or c["file"]
+        ET.SubElement(mk, "in").text = tc(start, fps)
+        ET.SubElement(mk, "out").text = tc(start, fps)
 
     return xmeml
 
