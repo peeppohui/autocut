@@ -1,0 +1,116 @@
+# -*- coding: utf-8 -*-
+"""Тест окна AutoCut: собираются ли страницы и те ли шаги.
+
+Главное здесь - не красота, а сохранность логики. Окно переезжало
+с ttk на customtkinter, и самое страшное - потерять или переставить
+шаг в цепочке сборки: такое не падает, а тихо делает не то.
+"""
+import sys
+from pathlib import Path as _P
+
+sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src" / "ui"))
+import bootstrap  # noqa: F401,F403
+
+import app as A
+
+fail = []
+
+
+def ok(name, cond, detail=""):
+    if cond:
+        print(f"OK   {name}")
+    else:
+        fail.append(name)
+        print(f"FAIL {name}  {detail}")
+
+
+captured = []
+A.App.go = lambda self, steps, result_dir: captured.append(steps)
+
+app = A.App()
+app.update_idletasks()
+
+
+def all_widgets(w):
+    out = []
+    for c in w.winfo_children():
+        out.append(c)
+        out.extend(all_widgets(c))
+    return out
+
+
+def fill_and_press(page_name, label, values=()):
+    """Заполнить поля и нажать кнопку на ОДНОЙ сборке страницы.
+
+    Нельзя звать show() между заполнением и нажатием: страница
+    пересоздаётся, поля с введёнными значениями исчезают.
+    """
+    app.show(page_name)
+    app.update_idletasks()
+    page = app.host.winfo_children()[0]
+    ents = [w for w in all_widgets(page)
+            if isinstance(w, A.ctk.CTkEntry)]
+    for e, v in zip(ents, values):
+        e.cget("textvariable").set(v)
+    for w in all_widgets(page):
+        if isinstance(w, A.ctk.CTkButton) and w.cget("text") == label:
+            w.invoke()
+            return True
+    return False
+
+
+# папка из реального прогона: кнопки проверяют существование пути,
+# поэтому подставлять нужно настоящее имя - «монтажи», не «монтаж»
+FAKE = "E:\\монтажи\\1. пробник интервью кати+богдан(нейро)"
+if not _P(FAKE).exists():          # проект переехал - тест не должен падать
+    FAKE = str(_P.home())
+
+# --- все страницы собираются и не пустые ---
+names = [n for _, items in A.GROUPS for n, _ in items]
+ok("все страницы в навигации", len(names) == 7, str(len(names)))
+empty = []
+for n in names:
+    app.show(n)
+    app.update_idletasks()
+    if not app.host.winfo_children():
+        empty.append(n)
+ok("ни одна страница не пустая", not empty, str(empty))
+ok("лог на месте и виден", app.logw.winfo_manager() != "")
+
+# --- кнопка не должна подменять состояние Tkinter ---
+# Раньше словарь состояния назывался self.state и затирал метод Tk,
+# на котором держится про заголовок окна. customtkinter падал сразу.
+ok("self.state не затирает метод Tk", not isinstance(app.state, dict),
+   type(app.state).__name__)
+ok("состояние запуска отдельно", isinstance(app.run_state, dict))
+
+# --- цепочки шагов те же, что до переезда ---
+ok("дайджест: кнопка отправила шаги",
+   fill_and_press("Дайджест", "Собрать рыбу", [FAKE]) and bool(captured))
+d = [t for t, _ in captured[-1]]
+ok("дайджест: шаги по порядку",
+   d == ["1. Определяю планы", "2. Раскладываю по склейкам",
+         "3. XML для Premiere"], str(d))
+argv = dict(captured[-1])["2. Раскладываю по склейкам"]
+ok("дайджест: режим digest на месте", "--mode" in argv
+   and "digest" in argv, str(argv[:6]))
+
+fill_and_press("Интервью 1 видео", "Собрать рыбу",
+               [FAKE + r"\synced\ref.mp4"])
+one = [t for t, _ in captured[-1]]
+ok("одно видео: шаги по порядку",
+   one == ["1. Рыба по тексту", "2. XML для Premiere", "3. Субтитры"],
+   str(one))
+
+# без файлов кнопка обязана просить, а не падать
+before = len(captured)
+fill_and_press("Интервью 1 видео", "Собрать рыбу")
+ok("без исходника шаги не запускаются", len(captured) == before)
+
+app.destroy()
+print()
+if fail:
+    print(f"UI FAIL ({len(fail)}): {fail}")
+    sys.exit(1)
+print("UI OK")

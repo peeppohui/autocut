@@ -1,418 +1,197 @@
 # -*- coding: utf-8 -*-
-"""Демо оформления AutoCut на customtkinter.
+"""Демо оформления AutoCut — витрина ui/theme.py.
 
-Это НЕ рабочее окно. Здесь показан только вид: палитра, отступы,
-типографика, карточки и элементы управления. Рабочее окно живёт в
-app.py и его не трогает.
+Рабочее окно живёт в app.py, это его демонстрация: та же палитра и те
+же элементы, но с выдуманными данными. Нужна, чтобы посмотреть на
+элементы в отрыве от пайплайна — например, прикрутить новый виджет и
+сразу оценить, как он сядет.
+
+Всё оформление берётся из theme.py. Демка НЕ держит свою копию
+палитры: две копии через месяц разъезжаются, и в окне появляются
+элементы разного цвета.
 
 Запуск:   python plugin/src/ui/demo_ctk.py
-Проверка без окна (собирает и сразу закрывает):
-          python plugin/src/ui/demo_ctk.py --selftest
+Проверка: python plugin/src/ui/demo_ctk.py --selftest
 """
 from __future__ import annotations
 
-import os
 import sys
-import tkinter as tk
 from pathlib import Path
 
 import customtkinter as ctk
 
-# Настоящий selects.csv для вкладки «Просмотр». Пусто - покажутся
-# заглушки, и демка запустится где угодно.
-SELECTS = os.environ.get("AUTOCUT_DEMO_SELECTS", "")
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 
-# ---------------------------------------------------------------- палитра
-# Дефолтная синяя тема customtkinter выглядит как чужой инструмент.
-# Свой набор цветов, чтобы окно выглядело частью проекта, а не сборкой.
-BG = "#0f1115"          # фон окна
-SURFACE = "#171a21"     # карточка
-RAISED = "#1e222b"      # поле, приподнятое
-BORDER = "#2a2f3a"
-TEXT = "#e6e9ef"
-MUTED = "#8b93a3"       # подписи, подсказки
-ACCENT = "#5b8cff"      # главное действие
-ACCENT_DIM = "#2f4a8f"
-SUCCESS = "#3ecf8e"
-DANGER = "#f2555a"
+import theme as T  # noqa: E402  — после sys.path, тема лежит рядом
 
-R = 10                  # единый радиус скругления
-PAD = 20                # единый отступ
-FIELDS = 7
-
+R, PAD = T.R, T.PAD
 SUBS = {
     "Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
-    "Просмотр": "Быстрая оценка монтажа без захода в Premiere",
+    "Просмотр": "Контактный лист рыбы",
     "Настройки": "Пороги чистки речи и раскладки кадров",
-    "Ход работы": "Что делает программа прямо сейчас",
-    "Интервью 1 видео": "Одна камера, одна дорожка",
-    "Проверка готового": "Что лежит в собранном проекте",
+    "Заглушка": "Страница будущего шаблона",
 }
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
 
-
-def btn(parent, text, kind="ghost", **kw):
-    """Кнопки одного семейства: главная, второстепенная, тихая."""
-    looks = {
-        "primary": dict(fg_color=ACCENT, hover_color="#7aa2ff",
-                        text_color="#0b1020", height=42, corner_radius=R),
-        "ghost": dict(fg_color=RAISED, hover_color=BORDER,
-                      text_color=TEXT, height=36, corner_radius=8),
-        "quiet": dict(fg_color="transparent", hover_color=RAISED,
-                      text_color=MUTED, height=30, corner_radius=8),
-    }
-    return ctk.CTkButton(parent, text=text, **looks[kind], **kw)
-
-
-def card(parent, title, subtitle=""):
-    """Карточка с заголовком. Возвращает внутренний фрейм для полей."""
-    box = ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=R)
-    # box обязан получить геометрию сам: если этого не сделать, он остаётся
-    # 1x1, и всё содержимое карточки схлопывается вместе с ним
-    box.pack(fill="x", padx=PAD, pady=(0, 16))
-    head = ctk.CTkFrame(box, fg_color="transparent")
-    head.pack(fill="x", padx=PAD, pady=(PAD, 0))
-    ctk.CTkLabel(head, text=title, text_color=TEXT, anchor="w",
-                 font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w")
-    if subtitle:
-        ctk.CTkLabel(head, text=subtitle, text_color=MUTED, anchor="w",
-                     font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(2, 0))
-    body = ctk.CTkFrame(box, fg_color="transparent")
-    # внутри прокрутки expand=True схлопывает карточку в 1x1: высоту
-    # прокручиваемая рамка берёт сама, по содержимому
-    body.pack(fill="x", padx=PAD, pady=(14, PAD))
-    body.grid_columnconfigure(1, weight=1)
-    return body
-
-
-def field(body, row, label, var, placeholder=""):
-    """Строка «подпись — поле — кнопка»."""
-    ctk.CTkLabel(body, text=label, text_color=MUTED, anchor="w",
-                 width=170, font=ctk.CTkFont(size=13)).grid(
-                     row=row, column=0, sticky="w", pady=5, padx=(0, 14))
-    ctk.CTkEntry(body, textvariable=var, height=36, corner_radius=8,
-                 fg_color=RAISED, border_color=BORDER, border_width=1,
-                 text_color=TEXT, font=ctk.CTkFont(size=13),
-                 placeholder_text=placeholder).grid(
-                     row=row, column=1, sticky="ew", pady=5)
-    btn(body, "…", "ghost", width=36).grid(row=row, column=2, padx=(8, 0))
-
-
-def switch(body, row, label, var, hint=""):
-    ctk.CTkSwitch(body, text=label, variable=var, progress_color=ACCENT,
-                  button_color=TEXT, button_hover_color="#ffffff",
-                  text_color=TEXT, font=ctk.CTkFont(size=13),
-                  width=46, height=24).grid(row=row, column=0, columnspan=2,
-                                            sticky="w", pady=6)
-    if hint:
-        ctk.CTkLabel(body, text=hint, text_color=MUTED, anchor="w",
-                     font=ctk.CTkFont(size=11)).grid(
-                         row=row + 1, column=0, columnspan=3, sticky="w")
-
-
-def slider(body, row, label, var, lo, hi, suffix=""):
-    ctk.CTkLabel(body, text=label, text_color=MUTED, anchor="w",
-                 font=ctk.CTkFont(size=13)).grid(row=row, column=0, sticky="w")
-    val = ctk.CTkLabel(body, text="", text_color=TEXT, anchor="e", width=56,
-                       font=ctk.CTkFont(size=13, weight="bold"))
-
-    def show(*_):
-        v = var.get()
-        val.configure(text=f"{v:.2f}".rstrip("0").rstrip(".") + suffix)
-
-    var.trace_add("write", show)
-    show()
-    ctk.CTkSlider(body, from_=lo, to=hi, number_of_steps=100,
-                  variable=var, height=14, button_color=ACCENT,
-                  button_hover_color="#7aa2ff", progress_color=ACCENT_DIM,
-                  fg_color=BORDER
-                  ).grid(row=row, column=1, sticky="ew", padx=14, pady=6)
-    val.grid(row=row, column=2, sticky="e")
-
-
-# ---------------------------------------------------------------- страницы
-def page_interview(parent):
+def page_form(parent):
     wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-    wide = ctk.StringVar()
-    gcam = ctk.StringVar()
-    gmic = ctk.StringVar()
-    hmic = ctk.StringVar()
-    out = ctk.StringVar(value="E:\\монтаж\\проект")
-    tgt = ctk.StringVar()
-    two_cam = ctk.BooleanVar(value=True)
-    only_tx = ctk.BooleanVar(value=False)
+    src = T.card(wrap, "Исходники", "Синхронизируются между собой по звуку")
+    v = ctk.StringVar()
+    T.field(src, 0, "Общий план", v, "camera_wide.mov")
+    T.field(src, 1, "Камера гостя", ctk.StringVar(), "camera_guest.mov")
+    T.field(src, 2, "Микрофон гостя", ctk.StringVar(), "_guest.wav")
 
-    src = card(wrap, "Исходники", "Синхронизируются между собой по звуку")
-    field(src, 0, "Общий план", wide, "camera_wide.mov")
-    field(src, 1, "Камера гостя", gcam, "camera_guest.mov")
-    field(src, 2, "Микрофон гостя", gmic, "_guest.wav")
-    field(src, 3, "Микрофон ведущего", hmic, "_host.wav")
-
-    opt = card(wrap, "Монтаж")
-    ctk.CTkLabel(opt, text="Хронометраж (ММ:СС)", text_color=MUTED, anchor="w",
-                 width=170, font=ctk.CTkFont(size=13)).grid(
-                     row=0, column=0, sticky="w", pady=5, padx=(0, 14))
-    ctk.CTkEntry(opt, textvariable=tgt, width=110, height=36, corner_radius=8,
-                 fg_color=RAISED, border_color=BORDER, border_width=1,
-                 text_color=TEXT, placeholder_text="пусто — не ограничивать",
-                 font=ctk.CTkFont(size=13)).grid(row=0, column=1, sticky="w", pady=5)
-    switch(opt, 1, "Второй ракурс на отдельной дорожке", two_cam,
-           "Premiere не понимает multiclip — две дорожки работают всегда")
-    switch(opt, 3, "Сначала только транскрипт", only_tx,
-           "правлю текст вручную, потом собираю рыбу")
-
-    dst = card(wrap, "Результат")
-    field(dst, 0, "Папка проекта", out)
+    opt = T.card(wrap, "Монтаж")
+    T.field(opt, 0, "Хронометраж (ММ:СС)", ctk.StringVar(),
+            "пусто — не ограничивать")
+    T.switch(opt, 1, "Второй ракурс на отдельной дорожке",
+             ctk.BooleanVar(value=True),
+             "Premiere не понимает multiclip — две дорожки работают всегда")
+    T.switch(opt, 3, "Сначала только транскрипт", ctk.BooleanVar(value=False),
+             "правлю текст вручную, потом собираю рыбу")
+    T.device_row(opt, 5)
 
     row = ctk.CTkFrame(wrap, fg_color="transparent")
     row.pack(fill="x", padx=PAD, pady=(0, PAD))
-    btn(row, "Собрать рыбу", "primary", width=180).pack(side="left")
-    btn(row, "Собрать из правленого текста", "ghost").pack(side="left", padx=10)
+    T.btn(row, "Собрать рыбу", "primary", width=180).pack(side="left")
+    T.btn(row, "Собрать из правленого текста", "ghost").pack(side="left",
+                                                            padx=10)
     return wrap
 
 
-def page_settings(parent):
+def page_grid(parent):
+    """Витрина сетки превью — как выглядит страница «Просмотр»."""
     wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-
-    cut = card(wrap, "Резка речи", "Пороги из settings.json — здесь без правки файла")
-    max_pause = ctk.DoubleVar(value=0.60)
-    merge_gap = ctk.DoubleVar(value=0.80)
-    min_keep = ctk.DoubleVar(value=1.00)
-    min_prob = ctk.DoubleVar(value=0.25)
-    slider(cut, 0, "Пауза до разрыва, с", max_pause, 0.1, 3.0, " с")
-    slider(cut, 1, "Склеивать разрывы до, с", merge_gap, 0.1, 3.0, " с")
-    slider(cut, 2, "Минимальный кусок, с", min_keep, 0.2, 5.0, " с")
-    slider(cut, 3, "Порог уверенности слов", min_prob, 0.05, 0.80)
-
-    shot = card(wrap, "Камера")
-    shot_min = ctk.DoubleVar(value=2.0)
-    shot_max = ctk.DoubleVar(value=12.0)
-    share_a = ctk.DoubleVar(value=0.70)
-    slider(shot, 0, "Короткий кадр, с", shot_min, 1.0, 6.0, " с")
-    slider(shot, 1, "Длинный кадр, с", shot_max, 5.0, 30.0, " с")
-    slider(shot, 2, "Доля основной камеры", share_a, 0.1, 1.0)
-
-    sw = card(wrap, "Поведение")
-    switch(sw, 0, "Отсекать куски без картинки", ctk.BooleanVar(value=True),
-           "камера не включена — выкидываем молчание вместо речи")
-    switch(sw, 2, "Прикрывать стыки перебивками", ctk.BooleanVar(value=False),
-           "иначе на стыках будет прыжок кадра")
-
-    note = ctk.CTkLabel(wrap, text="", text_color=SUCCESS, anchor="w",
-                        font=ctk.CTkFont(size=12))
-    note.pack(anchor="w", padx=PAD, pady=(0, 10))
-
-    def save():
-        """Пишем в settings.json через загрузчик: он сначала пишет во
-        временный файл и только потом переименовывает, так что упавшее
-        окно не оставит после себя обрезанную конфигурацию."""
-        import sys as _s
-        _s.path.insert(0, str(Path(__file__).resolve().parents[1] / "config"))
-        import settings as st
-        for key, var in (("interview.max_pause_sec", max_pause),
-                         ("interview.merge_gap_sec", merge_gap),
-                         ("interview.min_keep_sec", min_keep),
-                         ("interview.min_word_prob", min_prob),
-                         ("interview_cuts.shot_min_sec", shot_min),
-                         ("interview_cuts.shot_max_sec", shot_max),
-                         ("interview_cuts.cam_a_share", share_a)):
-            st.set_value(key, round(float(var.get()), 3))
-        note.configure(text=f"Сохранено в settings.json ({len(FIELDS)} значений)")
-        note.after(4000, lambda: note.configure(text=""))
-
-    btn(wrap, "Сохранить настройки", "primary", width=200,
-        command=save).pack(anchor="w", padx=PAD, pady=(0, PAD))
-    return wrap
-
-
-def page_single(parent):
-    """Заглушка будущего шаблона — показывает, как добавляется новый."""
-    wrap = ctk.CTkFrame(parent, fg_color="transparent")
-    box = card(wrap, "Интервью 1 видео", "Без второй камеры, одна дорожка")
-    field(box, 0, "Видео", ctk.StringVar(), "interview.mov")
-    field(box, 1, "Куда сложить", ctk.StringVar(), "E:\\монтаж\\проект")
-    btn(wrap, "Собрать рыбу", "primary", width=180).pack(
-        anchor="w", padx=PAD, pady=(0, PAD))
-    return wrap
-
-
-def page_check(parent):
-    """Заглушка проверки готового файла."""
-    wrap = ctk.CTkFrame(parent, fg_color="transparent")
-    box = card(wrap, "Проверка готового", "Покажем, что лежит в ryba.xml")
-    field(box, 0, "Файл проекта Premiere", ctk.StringVar(), "ryba.xml")
-    btn(wrap, "Открыть", "primary", width=180).pack(anchor="w", padx=PAD,
-                                                    pady=(0, PAD))
-    return wrap
-
-
-def page_preview(parent):
-    """Контактный лист монтажа: кадр каждого куска + кто говорит.
-
-    Если указан реальный selects.csv (аргументом или переменной
-    AUTOCUT_DEMO_SELECTS) - показывает настоящие превью, иначе
-    заглушки, чтобы демка запускалась на любом компьютере.
-    """
-    wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-
-    shots, total = [], ""
-    if SELECTS and Path(SELECTS).is_file():
-        import sys as _s
-        _s.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        import bootstrap  # noqa: F401
-        import preview as pv
-        rows = pv.make_thumbs(SELECTS, Path(SELECTS).parent / "thumbs")
-        shots = [(f"{r['in']:.1f}с", r.get("hero") or "-", r.get("desc", ""),
-                  r.get("thumb")) for r in rows]
-        dur = sum(r["out"] - r["in"] for r in rows)
-        total = f"Рыба, {len(rows)} кусков · {int(dur // 60)}:{int(dur % 60):02d}"
-
     head = ctk.CTkFrame(wrap, fg_color="transparent")
     head.pack(fill="x", padx=PAD, pady=(0, 12))
-    ctk.CTkLabel(head, text=total or "Рыба, 73 куска · 6:53", text_color=TEXT,
-                 anchor="w", font=ctk.CTkFont(size=14, weight="bold")).pack(
-                     anchor="w")
-    ctk.CTkLabel(head, text="Каждый кадр — один кусок. Клик открывает крупно.",
-                 text_color=MUTED, anchor="w",
-                 font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(2, 0))
-    btn(head, "Собрать превью и открыть", "primary").pack(anchor="e")
+    ctk.CTkLabel(head, text="Рыба, 73 куска · 6:53", text_color=T.TEXT,
+                 anchor="w", font=T.font(14, "bold")).pack(anchor="w")
+    T.btn(head, "Собрать превью и открыть", "primary").pack(anchor="e")
 
     grid = ctk.CTkFrame(wrap, fg_color="transparent")
     grid.pack(fill="x", padx=PAD)
     for c in range(4):
         grid.grid_columnconfigure(c, weight=1, uniform="t")
-
-    # PhotoImage должен жить до конца: сборщик мусора уберёт картинку,
-    # и в ячейке останется дыра
-    keep = []
-    if not shots:
-        shots = [(t, w, x, None) for t, w, x in [
-            ("00:02:14", "ВЕДУЩИЙ", "привет! У меня сегодня в гостях…"),
-            ("00:02:20", "ГОСТЬ", "Привет, Катя."),
-            ("00:02:26", "ВЕДУЩИЙ", "Расскажи вкратце о правилах игры…"),
-            ("00:02:38", "ГОСТЬ", "ДНД, подземелья и драконы."),
-            ("00:02:52", "ВЕДУЩИЙ", "а как тебе в целом такой жанр?"),
-            ("00:03:10", "ГОСТЬ", "мне нравится, что тут есть выбор…"),
-            ("00:03:34", "ГОСТЬ", "я собираю партию и каждый раз забываю…"),
-            ("00:04:02", "ВЕДУЩИЙ", "а ты сам играл за мастера?")]]
-
-    for k, (t, who, text, thumb) in enumerate(shots):
-        cell = ctk.CTkFrame(grid, fg_color=SURFACE, corner_radius=8)
+    shots = [("00:02:14", "ВЕДУЩИЙ", "привет! У меня сегодня в гостях…"),
+             ("00:02:20", "ГОСТЬ", "Привет, Катя."),
+             ("00:02:26", "ВЕДУЩИЙ", "Расскажи вкратце о правилах…"),
+             ("00:02:38", "ГОСТЬ", "ДНД, подземелья и драконы."),
+             ("00:02:52", "ВЕДУЩИЙ", "а как тебе такой жанр?"),
+             ("00:03:10", "ГОСТЬ", "мне нравится, что тут есть выбор…"),
+             ("00:03:34", "ГОСТЬ", "собираю партию и всегда забываю…"),
+             ("00:04:02", "ВЕДУЩИЙ", "а ты сам играл за мастера?")]
+    for k, (t, who, text) in enumerate(shots):
+        cell = ctk.CTkFrame(grid, fg_color=T.SURFACE, corner_radius=8)
         cell.grid(row=k // 4, column=k % 4, sticky="nsew", padx=4, pady=4)
-        if thumb and Path(thumb).is_file():
-            img = tk.PhotoImage(file=thumb)
-            img = img.subsample(2, 2)      # превью уже 384 -> 192
-            keep.append(img)
-            ctk.CTkLabel(cell, text="", image=img, height=92,
-                         corner_radius=6).pack(fill="x", padx=8, pady=(8, 4))
-        else:
-            ctk.CTkLabel(cell, text="", height=92, corner_radius=6,
-                         fg_color=RAISED, text_color=MUTED,
-                         font=ctk.CTkFont(size=11)).pack(fill="x", padx=8,
-                                                        pady=(8, 4))
-        ctk.CTkLabel(cell, text=f"{who} · {t}", text_color=ACCENT, anchor="w",
-                     font=ctk.CTkFont(size=11, weight="bold")).pack(
-                         anchor="w", padx=8)
-        ctk.CTkLabel(cell, text=text, text_color=MUTED, anchor="w",
-                     font=ctk.CTkFont(size=11), wraplength=150,
-                     justify="left").pack(anchor="w", padx=8, pady=(0, 8))
+        ctk.CTkLabel(cell, text="", height=92, corner_radius=6,
+                     fg_color=T.RAISED).pack(fill="x", padx=8, pady=(8, 4))
+        ctk.CTkLabel(cell, text=f"{who} · {t}", text_color=T.ACCENT,
+                     anchor="w", font=T.font(11, "bold")).pack(anchor="w",
+                                                              padx=8)
+        ctk.CTkLabel(cell, text=text, text_color=T.MUTED, anchor="w",
+                     font=T.font(11), wraplength=150, justify="left").pack(
+                         anchor="w", padx=8, pady=(0, 8))
     return wrap
 
 
-def page_log(parent):
-    box = ctk.CTkTextbox(parent, fg_color=SURFACE, corner_radius=R,
-                         border_color=BORDER, border_width=1,
-                         text_color=MUTED, font=ctk.CTkFont(
-                             family="Consolas", size=12))
-    box.pack(fill="both", expand=True, padx=PAD, pady=PAD)
-    box.insert("1.0", "Здесь будет ход работы.\n")
-    box.configure(state="disabled")
-    return box
+def page_sliders(parent):
+    wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+    cut = T.card(wrap, "Резка речи", "Пороги из settings.json")
+    T.slider(cut, 0, "Пауза до разрыва, с", ctk.DoubleVar(value=0.60),
+             0.1, 3.0, " с")
+    T.slider(cut, 1, "Склеивать разрывы до, с", ctk.DoubleVar(value=0.80),
+             0.1, 3.0, " с")
+    T.slider(cut, 2, "Минимальный кусок, с", ctk.DoubleVar(value=1.00),
+             0.2, 5.0, " с")
+    T.slider(cut, 3, "Порог уверенности слов", ctk.DoubleVar(value=0.25),
+             0.05, 0.80)
+
+    shot = T.card(wrap, "Камера")
+    T.slider(shot, 0, "Короткий кадр, с", ctk.DoubleVar(value=2.0),
+             1.0, 6.0, " с")
+    T.slider(shot, 1, "Длинный кадр, с", ctk.DoubleVar(value=12.0),
+             5.0, 30.0, " с")
+    T.slider(shot, 2, "Доля основной камеры", ctk.DoubleVar(value=0.70),
+             0.1, 1.0)
+
+    sw = T.card(wrap, "Поведение")
+    T.switch(sw, 0, "Отсекать куски без картинки", ctk.BooleanVar(value=True),
+             "камера не включена — выкидываем молчание вместо речи")
+    T.switch(sw, 2, "Прикрывать стыки перебивками", ctk.BooleanVar(value=False))
+
+    T.btn(wrap, "Сохранить настройки", "primary", width=200).pack(
+        anchor="w", padx=PAD, pady=(0, PAD))
+    return wrap
 
 
-# ---------------------------------------------------------------- окно
+def page_stub(parent):
+    wrap = ctk.CTkFrame(parent, fg_color="transparent")
+    T.card(wrap, "Будущий шаблон", "Сюда, например, встанет телешоу")
+    T.btn(wrap, "Собрать", "primary", width=180).pack(anchor="w", padx=PAD,
+                                                     pady=(0, PAD))
+    return wrap
+
+
 class Demo(ctk.CTk):
-    # Слева список шаблонов. Группы — чтобы новые режимы не сыпались в
-    # одну кучу: сначала то, чем пользуешься каждый день, потом остальное.
-    GROUPS = [
-        ("Основное", [("Интервью 2 камеры", page_interview),
-                      ("Просмотр", page_preview),
-                      ("Настройки", page_settings),
-                      ("Ход работы", page_log)]),
-        ("Другие шаблоны", [("Интервью 1 видео", page_single),
-                            ("Проверка готового", page_check)]),
-    ]
+    PAGES = [("Интервью 2 камеры", page_form),
+             ("Просмотр", page_grid),
+             ("Настройки", page_sliders),
+             ("Заглушка", page_stub)]
 
     def __init__(self):
         super().__init__()
         self.title("AutoCut — демо оформления")
         self.geometry("940x700")
-        self.configure(fg_color=BG)
+        self.configure(fg_color=T.BG)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-
         self._nav = {}
 
-        side = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0,
+        side = ctk.CTkFrame(self, fg_color=T.SURFACE, corner_radius=0,
                             width=232)
         side.grid(row=0, column=0, sticky="ns")
         side.grid_propagate(False)
-        ctk.CTkLabel(side, text="AutoCut", text_color=TEXT, anchor="w",
-                     font=ctk.CTkFont(size=21, weight="bold")).pack(
-                         anchor="w", padx=PAD, pady=(24, 2))
-        ctk.CTkLabel(side, text="демо оформления", text_color=MUTED, anchor="w",
-                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=PAD,
+        ctk.CTkLabel(side, text="AutoCut", text_color=T.TEXT, anchor="w",
+                     font=T.font(21, "bold")).pack(anchor="w", padx=PAD,
+                                                   pady=(24, 2))
+        ctk.CTkLabel(side, text="демо оформления", text_color=T.MUTED,
+                     anchor="w", font=T.font(11)).pack(anchor="w", padx=PAD,
                                                       pady=(0, 20))
+        for name, _ in self.PAGES:
+            T.sidebar_item(side, name, command=lambda n=name: self.show(n)
+                           ).pack(fill="x", padx=10, pady=1)
+            self._nav[name] = side.winfo_children()[-1]
 
-        for title, items in self.GROUPS:
-            ctk.CTkLabel(side, text=title.upper(), text_color="#5f6779",
-                         anchor="w", font=ctk.CTkFont(size=10, weight="bold")
-                         ).pack(anchor="w", padx=PAD, pady=(10, 4))
-            for name, fn in items:
-                b = ctk.CTkButton(side, text=name, anchor="w", height=36,
-                                  corner_radius=8, fg_color="transparent",
-                                  hover_color=RAISED, text_color=MUTED,
-                                  font=ctk.CTkFont(size=13),
-                                  command=lambda n=name: self.show(n))
-                b.pack(fill="x", padx=10, pady=1)
-                self._nav[name] = b
+        body = ctk.CTkFrame(self, fg_color=T.BG, corner_radius=0)
+        body.grid(row=0, column=1, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(2, weight=1)
 
-        self.body = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
-        self.body.grid(row=0, column=1, sticky="nsew")
-        self.body.grid_columnconfigure(0, weight=1)
-        # раздаём вес строке с содержимым (row=2), а не подзаголовку
-        self.body.grid_rowconfigure(2, weight=1)
-
-        self.title_lbl = ctk.CTkLabel(self.body, text="", text_color=TEXT,
-                                      anchor="w",
-                                      font=ctk.CTkFont(size=23, weight="bold"))
+        self.title_lbl = ctk.CTkLabel(body, text="", text_color=T.TEXT,
+                                      anchor="w", font=T.font(23, "bold"))
         self.title_lbl.grid(row=0, column=0, sticky="w", padx=PAD,
                             pady=(PAD + 6, 2))
-        self.sub_lbl = ctk.CTkLabel(self.body, text="", text_color=MUTED,
-                                    anchor="w", font=ctk.CTkFont(size=12))
+        self.sub_lbl = ctk.CTkLabel(body, text="", text_color=T.MUTED,
+                                    anchor="w", font=T.font(12))
         self.sub_lbl.grid(row=1, column=0, sticky="w", padx=PAD, pady=(0, 8))
-
-        self.host = ctk.CTkFrame(self.body, fg_color="transparent")
+        self.host = ctk.CTkFrame(body, fg_color="transparent")
         self.host.grid(row=2, column=0, sticky="nsew")
         self.host.grid_columnconfigure(0, weight=1)
         self.host.grid_rowconfigure(0, weight=1)
-
         self.show("Интервью 2 камеры")
 
-    def show(self, name, sub=None):
+    def show(self, name):
         for w in self.host.winfo_children():
             w.destroy()
         self.title_lbl.configure(text=name)
-        self.sub_lbl.configure(text=sub or SUBS.get(name, ""))
+        self.sub_lbl.configure(text=SUBS.get(name, ""))
         for n, b in self._nav.items():
-            b.configure(fg_color=RAISED if n == name else "transparent",
-                        text_color=TEXT if n == name else MUTED)
-        # страницу ищем по имени, а не по переменной цикла: иначе после
-        # цикла остаётся последняя и открывается всегда одна и та же
-        page = next(f for _, items in self.GROUPS for n, f in items
-                    if n == name)
+            b.configure(fg_color=T.RAISED if n == name else "transparent",
+                        text_color=T.TEXT if n == name else T.MUTED)
+        # страницу ищем по имени, а не по переменной цикла: после цикла
+        # остаётся последняя, и открывается всегда одна и та же
+        page = next(f for n, f in self.PAGES if n == name)
         page(self.host).grid(row=0, column=0, sticky="nsew")
 
 
@@ -420,11 +199,9 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     app = Demo()
     if "--selftest" in argv:
-        # строим все страницы и закрываемся: ловим ошибки без окна
-        for _, items in Demo.GROUPS:
-            for name, _fn in items:
-                app.show(name)
-                app.update_idletasks()
+        for name, _ in Demo.PAGES:
+            app.show(name)
+            app.update_idletasks()
         app.destroy()
         print("DEMO OK: все страницы собрались")
         return 0
