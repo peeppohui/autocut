@@ -163,7 +163,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="AutoCut SRT — субтитры для Premiere")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--selects", help="selects.csv из interview.py (есть текст)")
-    src.add_argument("--json", help="speech.json (только интервалы, текста нет)")
+    src.add_argument("--json", help="speech.json: только интервалы исходника, "
+                                   "текста нет - субтитры не собрать")
     ap.add_argument("--out", default="subtitles.srt", help="выходной SRT")
     ap.add_argument("--keep-speaker", action="store_true",
                     help="не убирать имя спикера из текста")
@@ -190,18 +191,32 @@ def main(argv=None) -> int:
         print("Если брал speech.json — там только тайминги, нужен selects.csv.")
         return 1
 
+    # speech.json хранит одни интервалы, текста в нём нет, и build_srt
+    # молча выкидывал такие реплики. На выходе оказывался пустой файл,
+    # а инструмент рапортовал «сохранено, 73 реплик». Проверяем текст
+    # ДО записи: пустой SRT хуже, чем явная ошибка.
+    if not any((s.get("text") or "").strip() for s in segs):
+        print("В файле нет текста реплик — субтитры собрать не из чего.")
+        print("Бери selects.csv:")
+        print("  python -m src.io.srt --selects selects.csv --out ryba.srt")
+        return 1
+
     max_chars = int(settings.get("export.srt_max_chars", 0)) or args.max_chars
     if max_chars:
         for s in segs:
             s["text"] = wrap_text(s["text"], max_chars)
 
     text = build_srt(segs, drop_speaker=not args.keep_speaker)
+    if not text.strip():
+        print("После сборки не осталось ни одного блока — проверь тайминги.")
+        return 1
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text + "\n", encoding="utf-8-sig")
 
+    n_blocks = text.count("-->")
     last = max((float(s["end"]) for s in segs), default=0.0)
-    print(f"SRT сохранён: {out} ({len(segs)} реплик, до {fmt_time(last)}).")
+    print(f"SRT сохранён: {out} ({n_blocks} реплик, до {fmt_time(last)}).")
     print("Premiere: File > Import, либо монтажная панель > Субтитры > импорт.")
     return 0
 

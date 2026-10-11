@@ -124,6 +124,32 @@ apart = build_srt([
 ])
 eq("одинаковые реплики в разном месте остаются", apart.count("да"), 2)
 
+# --- speech.json без текста не должен молча портить файл ---
+# Раньше build_srt выкидывал реплики без текста, на выходе оставался файл
+# в 5 байт, а инструмент рапортовал «сохранено, 73 реплик». Проверяем,
+# что main() отказывается работать и код возврата ненулевой.
+import json as _json
+import tempfile as _tf
+from srt import main as srt_main
+
+with _tf.TemporaryDirectory() as _td:
+    _p = _P(_td)
+    (_p / "speech.json").write_text(_json.dumps(
+        [{"start": 1.0, "end": 3.0}, {"start": 3.0, "end": 5.0}]),
+        encoding="utf-8")
+    _out = _p / "out.srt"
+    rc = srt_main(["--json", str(_p / "speech.json"), "--out", str(_out)])
+    eq("пустой SRT не пишется молча", _out.exists(), False)
+    eq("возвращается ошибка", rc != 0, True)
+
+    # с текстом - работает
+    (_p / "selects.csv").write_text(
+        "file,desc,duration,in,out\n"
+        "cam.mp4,\"ВЕДУЩИЙ: привет\",2.0,0,2\n",
+        encoding="utf-8")
+    rc2 = srt_main(["--selects", str(_p / "selects.csv"), "--out", str(_out)])
+    eq("с текстом SRT пишется", rc2 == 0 and _out.is_file(), True)
+
 print()
 if fail:
     print(f"SRT FAIL ({len(fail)}): {fail}")
