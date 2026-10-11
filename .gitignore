@@ -52,3 +52,6 @@ preview/
 sheets/
 shots*/
 *_preview/
+# Временные файлы сборки превью
+plugin/src/io/_ffconcat.tmp
+_preview_tmp/
