@@ -11,9 +11,16 @@ app.py и его не трогает.
 """
 from __future__ import annotations
 
+import os
 import sys
+import tkinter as tk
+from pathlib import Path
 
 import customtkinter as ctk
+
+# Настоящий selects.csv для вкладки «Просмотр». Пусто - покажутся
+# заглушки, и демка запустится где угодно.
+SELECTS = os.environ.get("AUTOCUT_DEMO_SELECTS", "")
 
 # ---------------------------------------------------------------- палитра
 # Дефолтная синяя тема customtkinter выглядит как чужой инструмент.
@@ -31,6 +38,16 @@ DANGER = "#f2555a"
 
 R = 10                  # единый радиус скругления
 PAD = 20                # единый отступ
+FIELDS = 7
+
+SUBS = {
+    "Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
+    "Просмотр": "Быстрая оценка монтажа без захода в Premiere",
+    "Настройки": "Пороги чистки речи и раскладки кадров",
+    "Ход работы": "Что делает программа прямо сейчас",
+    "Интервью 1 видео": "Одна камера, одна дорожка",
+    "Проверка готового": "Что лежит в собранном проекте",
+}
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -183,8 +200,124 @@ def page_settings(parent):
     switch(sw, 2, "Прикрывать стыки перебивками", ctk.BooleanVar(value=False),
            "иначе на стыках будет прыжок кадра")
 
-    btn(wrap, "Сохранить настройки", "primary", width=200).pack(
+    note = ctk.CTkLabel(wrap, text="", text_color=SUCCESS, anchor="w",
+                        font=ctk.CTkFont(size=12))
+    note.pack(anchor="w", padx=PAD, pady=(0, 10))
+
+    def save():
+        """Пишем в settings.json через загрузчик: он сначала пишет во
+        временный файл и только потом переименовывает, так что упавшее
+        окно не оставит после себя обрезанную конфигурацию."""
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parents[1] / "config"))
+        import settings as st
+        for key, var in (("interview.max_pause_sec", max_pause),
+                         ("interview.merge_gap_sec", merge_gap),
+                         ("interview.min_keep_sec", min_keep),
+                         ("interview.min_word_prob", min_prob),
+                         ("interview_cuts.shot_min_sec", shot_min),
+                         ("interview_cuts.shot_max_sec", shot_max),
+                         ("interview_cuts.cam_a_share", share_a)):
+            st.set_value(key, round(float(var.get()), 3))
+        note.configure(text=f"Сохранено в settings.json ({len(FIELDS)} значений)")
+        note.after(4000, lambda: note.configure(text=""))
+
+    btn(wrap, "Сохранить настройки", "primary", width=200,
+        command=save).pack(anchor="w", padx=PAD, pady=(0, PAD))
+    return wrap
+
+
+def page_single(parent):
+    """Заглушка будущего шаблона — показывает, как добавляется новый."""
+    wrap = ctk.CTkFrame(parent, fg_color="transparent")
+    box = card(wrap, "Интервью 1 видео", "Без второй камеры, одна дорожка")
+    field(box, 0, "Видео", ctk.StringVar(), "interview.mov")
+    field(box, 1, "Куда сложить", ctk.StringVar(), "E:\\монтаж\\проект")
+    btn(wrap, "Собрать рыбу", "primary", width=180).pack(
         anchor="w", padx=PAD, pady=(0, PAD))
+    return wrap
+
+
+def page_check(parent):
+    """Заглушка проверки готового файла."""
+    wrap = ctk.CTkFrame(parent, fg_color="transparent")
+    box = card(wrap, "Проверка готового", "Покажем, что лежит в ryba.xml")
+    field(box, 0, "Файл проекта Premiere", ctk.StringVar(), "ryba.xml")
+    btn(wrap, "Открыть", "primary", width=180).pack(anchor="w", padx=PAD,
+                                                    pady=(0, PAD))
+    return wrap
+
+
+def page_preview(parent):
+    """Контактный лист монтажа: кадр каждого куска + кто говорит.
+
+    Если указан реальный selects.csv (аргументом или переменной
+    AUTOCUT_DEMO_SELECTS) - показывает настоящие превью, иначе
+    заглушки, чтобы демка запускалась на любом компьютере.
+    """
+    wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+
+    shots, total = [], ""
+    if SELECTS and Path(SELECTS).is_file():
+        import sys as _s
+        _s.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import bootstrap  # noqa: F401
+        import preview as pv
+        rows = pv.make_thumbs(SELECTS, Path(SELECTS).parent / "thumbs")
+        shots = [(f"{r['in']:.1f}с", r.get("hero") or "-", r.get("desc", ""),
+                  r.get("thumb")) for r in rows]
+        dur = sum(r["out"] - r["in"] for r in rows)
+        total = f"Рыба, {len(rows)} кусков · {int(dur // 60)}:{int(dur % 60):02d}"
+
+    head = ctk.CTkFrame(wrap, fg_color="transparent")
+    head.pack(fill="x", padx=PAD, pady=(0, 12))
+    ctk.CTkLabel(head, text=total or "Рыба, 73 куска · 6:53", text_color=TEXT,
+                 anchor="w", font=ctk.CTkFont(size=14, weight="bold")).pack(
+                     anchor="w")
+    ctk.CTkLabel(head, text="Каждый кадр — один кусок. Клик открывает крупно.",
+                 text_color=MUTED, anchor="w",
+                 font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(2, 0))
+    btn(head, "Собрать превью и открыть", "primary").pack(anchor="e")
+
+    grid = ctk.CTkFrame(wrap, fg_color="transparent")
+    grid.pack(fill="x", padx=PAD)
+    for c in range(4):
+        grid.grid_columnconfigure(c, weight=1, uniform="t")
+
+    # PhotoImage должен жить до конца: сборщик мусора уберёт картинку,
+    # и в ячейке останется дыра
+    keep = []
+    if not shots:
+        shots = [(t, w, x, None) for t, w, x in [
+            ("00:02:14", "ВЕДУЩИЙ", "привет! У меня сегодня в гостях…"),
+            ("00:02:20", "ГОСТЬ", "Привет, Катя."),
+            ("00:02:26", "ВЕДУЩИЙ", "Расскажи вкратце о правилах игры…"),
+            ("00:02:38", "ГОСТЬ", "ДНД, подземелья и драконы."),
+            ("00:02:52", "ВЕДУЩИЙ", "а как тебе в целом такой жанр?"),
+            ("00:03:10", "ГОСТЬ", "мне нравится, что тут есть выбор…"),
+            ("00:03:34", "ГОСТЬ", "я собираю партию и каждый раз забываю…"),
+            ("00:04:02", "ВЕДУЩИЙ", "а ты сам играл за мастера?")]]
+
+    for k, (t, who, text, thumb) in enumerate(shots):
+        cell = ctk.CTkFrame(grid, fg_color=SURFACE, corner_radius=8)
+        cell.grid(row=k // 4, column=k % 4, sticky="nsew", padx=4, pady=4)
+        if thumb and Path(thumb).is_file():
+            img = tk.PhotoImage(file=thumb)
+            img = img.subsample(2, 2)      # превью уже 384 -> 192
+            keep.append(img)
+            ctk.CTkLabel(cell, text="", image=img, height=92,
+                         corner_radius=6).pack(fill="x", padx=8, pady=(8, 4))
+        else:
+            ctk.CTkLabel(cell, text="", height=92, corner_radius=6,
+                         fg_color=RAISED, text_color=MUTED,
+                         font=ctk.CTkFont(size=11)).pack(fill="x", padx=8,
+                                                        pady=(8, 4))
+        ctk.CTkLabel(cell, text=f"{who} · {t}", text_color=ACCENT, anchor="w",
+                     font=ctk.CTkFont(size=11, weight="bold")).pack(
+                         anchor="w", padx=8)
+        ctk.CTkLabel(cell, text=text, text_color=MUTED, anchor="w",
+                     font=ctk.CTkFont(size=11), wraplength=150,
+                     justify="left").pack(anchor="w", padx=8, pady=(0, 8))
     return wrap
 
 
@@ -201,9 +334,16 @@ def page_log(parent):
 
 # ---------------------------------------------------------------- окно
 class Demo(ctk.CTk):
-    PAGES = [("Интервью 2 камеры", page_interview),
-             ("Настройки", page_settings),
-             ("Ход работы", page_log)]
+    # Слева список шаблонов. Группы — чтобы новые режимы не сыпались в
+    # одну кучу: сначала то, чем пользуешься каждый день, потом остальное.
+    GROUPS = [
+        ("Основное", [("Интервью 2 камеры", page_interview),
+                      ("Просмотр", page_preview),
+                      ("Настройки", page_settings),
+                      ("Ход работы", page_log)]),
+        ("Другие шаблоны", [("Интервью 1 видео", page_single),
+                            ("Проверка готового", page_check)]),
+    ]
 
     def __init__(self):
         super().__init__()
@@ -213,7 +353,7 @@ class Demo(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        self._nav = []
+        self._nav = {}
 
         side = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=0,
                             width=232)
@@ -224,15 +364,20 @@ class Demo(ctk.CTk):
                          anchor="w", padx=PAD, pady=(24, 2))
         ctk.CTkLabel(side, text="демо оформления", text_color=MUTED, anchor="w",
                      font=ctk.CTkFont(size=11)).pack(anchor="w", padx=PAD,
-                                                      pady=(0, 26))
-        for name, _ in self.PAGES:
-            b = ctk.CTkButton(side, text=name, anchor="w", height=38,
-                              corner_radius=8, fg_color="transparent",
-                              hover_color=RAISED, text_color=MUTED,
-                              font=ctk.CTkFont(size=13), command=(
-                                  lambda n=name: self.show(n)))
-            b.pack(fill="x", padx=10, pady=2)
-            self._nav.append(b)
+                                                      pady=(0, 20))
+
+        for title, items in self.GROUPS:
+            ctk.CTkLabel(side, text=title.upper(), text_color="#5f6779",
+                         anchor="w", font=ctk.CTkFont(size=10, weight="bold")
+                         ).pack(anchor="w", padx=PAD, pady=(10, 4))
+            for name, fn in items:
+                b = ctk.CTkButton(side, text=name, anchor="w", height=36,
+                                  corner_radius=8, fg_color="transparent",
+                                  hover_color=RAISED, text_color=MUTED,
+                                  font=ctk.CTkFont(size=13),
+                                  command=lambda n=name: self.show(n))
+                b.pack(fill="x", padx=10, pady=1)
+                self._nav[name] = b
 
         self.body = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self.body.grid(row=0, column=1, sticky="nsew")
@@ -254,22 +399,20 @@ class Demo(ctk.CTk):
         self.host.grid_columnconfigure(0, weight=1)
         self.host.grid_rowconfigure(0, weight=1)
 
-        SUBS = {"Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
-                "Настройки": "Пороги чистки речи и раскладки кадров",
-                "Ход работы": "Что делает программа прямо сейчас"}
-        self.show("Интервью 2 камеры", SUBS["Интервью 2 камеры"])
+        self.show("Интервью 2 камеры")
 
     def show(self, name, sub=None):
         for w in self.host.winfo_children():
             w.destroy()
         self.title_lbl.configure(text=name)
-        self.sub_lbl.configure(text=sub or "")
-        for b, (n, _) in zip(self._nav, self.PAGES):
+        self.sub_lbl.configure(text=sub or SUBS.get(name, ""))
+        for n, b in self._nav.items():
             b.configure(fg_color=RAISED if n == name else "transparent",
                         text_color=TEXT if n == name else MUTED)
         # страницу ищем по имени, а не по переменной цикла: иначе после
         # цикла остаётся последняя и открывается всегда одна и та же
-        page = next(f for n, f in self.PAGES if n == name)
+        page = next(f for _, items in self.GROUPS for n, f in items
+                    if n == name)
         page(self.host).grid(row=0, column=0, sticky="nsew")
 
 
@@ -278,9 +421,10 @@ def main(argv=None) -> int:
     app = Demo()
     if "--selftest" in argv:
         # строим все страницы и закрываемся: ловим ошибки без окна
-        for name, fn in Demo.PAGES:
-            app.show(name)
-            app.update_idletasks()
+        for _, items in Demo.GROUPS:
+            for name, _fn in items:
+                app.show(name)
+                app.update_idletasks()
         app.destroy()
         print("DEMO OK: все страницы собрались")
         return 0

@@ -60,6 +60,36 @@ def _normalize(node: Any) -> Any:
     return node
 
 
+def set_value(dotted: str, value: Any, *, path: Path | None = None) -> None:
+    """Кладёт значение по точечному пути и сохраняет файл.
+
+    Настройки правятся из окна AutoCut, поэтому запись должна быть
+    безопасной: сначала во временный файл рядом, потом переименование.
+    Иначе упавшее окно оставит после себя обрезанный settings.json, и
+    весь пайплайн встанет.
+    """
+    target = Path(path) if path is not None else SETTINGS_PATH
+    data = load(target, refresh=True)
+    parts = dotted.split(".")
+    node: Any = data
+    for part in parts[:-1]:
+        nxt = node.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            node[part] = nxt
+        node = nxt
+    node[parts[-1]] = value
+
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    tmp.replace(target)
+
+    global _cache
+    if path is None:
+        _cache = None
+
+
 def section(name: str, *, path: Path | None = None) -> Dict[str, Any]:
     """Возвращает секцию настроек по имени. Пусто, если секции нет."""
     data = load(path)

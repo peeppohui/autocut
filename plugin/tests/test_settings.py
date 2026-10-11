@@ -96,6 +96,35 @@ for dotted in ("project.fps", "project.drop_frame", "export.fps",
 # --- точечный путь доходит до вложенных значений рекомендованных длительностей ---
 check("вложенный ключ общий.1", get("digest.rec_duration_sec.общий")[1], 8.0)
 
+# --- запись: окно AutoCut правит settings.json, и это не должно ломать файл ---
+import shutil
+import tempfile
+from pathlib import Path as _P
+
+import settings as _s
+
+_tmpdir = tempfile.mkdtemp()
+_copy = _P(_tmpdir) / "settings.json"
+shutil.copy(_s.SETTINGS_PATH, _copy)
+
+before = _s.get("interview.max_pause_sec", path=_copy)
+_s.set_value("interview.max_pause_sec", 0.95, path=_copy)
+print(f"OK   запись значения: {before} -> "
+      f"{_s.get('interview.max_pause_sec', path=_copy)}")
+_s.set_value("interview_cuts.cam_a_share", 0.55, path=_copy)
+print(f"OK   запись во вложенный ключ: "
+      f"{_s.get('interview_cuts.cam_a_share', path=_copy)}")
+
+import json as _json
+_data = _json.load(open(_copy, encoding="utf-8"))
+assert len(_data) >= 10, _data.keys()
+assert _data["interview"].get("technical_phrases"), "словарь потерялся"
+assert not _copy.with_suffix(".json.tmp").exists(), "остался временный файл"
+print(f"OK   файл цел, ключей {len(_data)}, словарь цел, "
+      f"временного файла нет")
+
+shutil.rmtree(_tmpdir, ignore_errors=True)
+
 if failures:
     print(f"\nSETTINGS FAIL ({len(failures)}): {failures}")
     sys.exit(1)
