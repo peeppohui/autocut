@@ -276,6 +276,17 @@ class App(tk.Tk):
                         variable=two_cam).grid(row=8, column=1, sticky="w", pady=3)
         txf = self.field(fr, "Правленый transcript.txt:", 10)
 
+        # Ограничение по хронометражу. Пусто - без ограничения.
+        ttk.Label(fr, text="Хронометраж готового (ММ:СС, пусто — не ограничивать):").grid(
+            row=9, column=0, sticky="w")
+        tgt_sec = tk.StringVar()
+        ttk.Entry(fr, textvariable=tgt_sec, width=12).grid(
+            row=9, column=1, sticky="w", padx=6)
+
+        def tgt_args():
+            v = tgt_sec.get().strip()
+            return ["--target", v] if v else []
+
         def run():
             paths = {}
             for var, what in ((wide, "общий план"), (gcam, "камеру гостя"),
@@ -300,7 +311,8 @@ class App(tk.Tk):
                                        "--wide", f"{o}/synced/ref.mp4",
                                        "--guest-cam", f"{o}/synced/cam.mp4",
                                        "--guest-mic", f"{o}/synced/mic_guest.wav",
-                                       "--host-mic", f"{o}/synced/mic_host.wav"] + step2),
+                                       "--host-mic", f"{o}/synced/mic_host.wav"]
+                      + tgt_args() + step2),
             ]
             if not only_tx.get():
                 steps.append(
@@ -316,8 +328,8 @@ class App(tk.Tk):
                 self.log("Режим транскрипта: после шага 2 вычеркни мусор в rz/transcript.txt "
                          "строками с '-' и жми нижнюю кнопку.")
             self.go(steps, o)
-        ttk.Button(fr, text="СОБРАТЬ РЫБУ", command=run).grid(row=9, column=1, pady=10,
-                                                              sticky="e")
+        ttk.Button(fr, text="СОБРАТЬ РЫБУ", command=run).grid(row=11, column=1, pady=10,
+                                                               sticky="e")
 
         def run_from_tx():
             t = txf.get().strip().strip('"')
@@ -334,7 +346,8 @@ class App(tk.Tk):
                 ("1. Сборка из правленого текста",
                  [str(MODES / "interview.py"), "--wide", w, "--guest-cam", g, "--outdir", f"{o}/rz",
                   "--from-transcript", t]
-                 + (["--broll", bro.get().strip()] if bro.get().strip() else [])),
+                 + (["--broll", bro.get().strip()] if bro.get().strip() else [])
+                 + tgt_args()),
                 ("2. XML для Premiere",
                  [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv", "--media-dir", o,
                   "--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl", "--trim-rec"]

@@ -544,6 +544,127 @@ def plan_cameras(chunks, wide: Path, gcam: Path, cache_dir: Path):
     return planned, dropped, swapped
 
 
+def technical_phrases() -> List[str]:
+    return list(settings.get("interview.technical_phrases", []) or [])
+
+
+def chunk_score(i: int, o: int, text: str) -> int:
+    """Насколько кусок жалко выкидывать. Больше - режется первым.
+
+    Техническое ищем по ДОЛЕ слов, а не по наличию: фраза «Я просто
+    говорю, подождите, стойте, всем привет» содержит «подождите», но
+    это зачин интервью, и резать её нельзя. Приговор выносит только
+    когда почти весь кусок - перебивка.
+    """
+    low = (text or "").lower()
+    words = low.split()
+    score = 0
+
+    hits = sum(1 for w in words if any(p in w for p in technical_phrases()))
+    if hits and hits >= max(2, len(words) * 0.5):
+        return 1000
+
+    n_words = len(words)
+    if n_words <= 2:
+        score += 40
+    if (o - i) < 2.0:
+        score += 30
+    if any(f in low for f in ("[?]", "[~]", "[!]")):
+        score += 20
+    if n_words <= 4:
+        score += 10
+    return score
+
+
+def fit_to_target(chunks, target_sec: float, protect_edges: int = 1):
+    """Оставляет куски, которые влезают в заданный хронометраж.
+
+    Режем не отдельные куски, а СПОШНЫЕ СОСЕДНИЕ: разрыв внутри
+    перебивки читается как дыра в разговоре, а вырезанная подряд
+    идущая чепуха — как её отсутствие.
+
+    Зачин и концовку не трогаем: «сегодня у нас в гостях...» и
+    «всем пока» в эфире обязательны, какой бы длинной ни оказалась
+    остальная часть. Если и без них не влезает - режем и их, но
+    последними.
+    """
+    if target_sec <= 0 or not chunks:
+        return chunks, [], sum(o - i for i, o, *_ in chunks)
+
+    total = sum(o - i for i, o, _, _, _ in chunks)
+    if total <= target_sec + 0.5:
+        return chunks, [], total
+
+    weak_thr = 30
+    strong = [chunk_score(*c[:2], c[3]) for c in chunks]
+
+    # зачин и концовку не выбрасываем: они нужны в эфире всегда. Защищаем
+    # по ПОЗИЦИИ, а не по времени в исходнике - после отсева чёрных
+    # кадров отсчёт начинается со 122-й секунды, и проверка по времени
+    # рубила бы зачин, который стоит первым
+    protected = set(range(min(protect_edges, len(chunks))))
+    protected.update(range(max(0, len(chunks) - protect_edges), len(chunks)))
+
+    # соседние слабые куски склеиваем в один блок; защищённые блок рвут,
+    # иначе зачин уехал бы вместе с перебивкой перед ним
+    runs, cur = [], []
+    for k, sc in enumerate(strong):
+        if k in protected:
+            if cur:
+                runs.append(cur)
+                cur = []
+            continue
+        if sc >= weak_thr:
+            cur.append(k)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+
+    def run_len(r):
+        return sum(chunks[k][1] - chunks[k][0] for k in r)
+
+    now = total
+    dropped = set()
+    for r in sorted(runs, key=run_len, reverse=True):
+        if now <= target_sec:
+            break
+        dropped.update(r)
+        now -= run_len(r)
+
+    # не хватило слабого материала - добираем кусками от самых слабых,
+    # но зачин и концовку не трогаем даже тогда
+    if now > target_sec:
+        order = sorted(range(len(chunks)),
+                       key=lambda k: (-strong[k], chunks[k][0]))
+        for k in order:
+            if now <= target_sec:
+                break
+            if k in dropped or k in protected:
+                continue
+            dropped.add(k)
+            now -= chunks[k][1] - chunks[k][0]
+
+    kept = [c for k, c in enumerate(chunks) if k not in dropped]
+    return kept, [chunks[k] for k in sorted(dropped)], now
+
+
+def parse_duration(text) -> float:
+    """«10:00», «1:02:30» или «600» -> секунды. Пустое - 0 (цели нет)."""
+    s = str(text or "").strip()
+    if not s:
+        return 0.0
+    try:
+        parts = [float(p) for p in s.replace(",", ".").split(":")]
+    except ValueError:
+        return 0.0
+    out = 0.0
+    for p in parts:
+        out = out * 60 + p
+    return out
+
+
 def run_from_transcript(args) -> int:
     """Сборка selects из правленого transcript.txt (второй проход:
     текст уже вычищен человеком). Видео нужны для путей, микрофоны — нет."""
@@ -566,8 +687,17 @@ def run_from_transcript(args) -> int:
     CAMS = {"wide": (wide, args.wide_plan, "ведущий"),
             "gcam": (gcam, args.guest_plan, "гость")}
     chunks, _, _ = plan_cameras(chunks, wide, gcam, out)
+    chunks, dropped_time, now_sec = fit_to_target(
+        chunks, parse_duration(args.target))
+    if dropped_time:
+        print(f"Хронометраж {args.target}: осталось {now_sec:.1f}с, "
+              f"вырезано {len(dropped_time)} кусков")
+    if now_sec > parse_duration(args.target) + 0.5:
+        print(f"ВНИМАНИЕ: цель не набрана - осталось {now_sec:.1f}с. "
+              f"Сильных кусков больше нечего резать, зачин и концовку "
+              f"не трогаю. Сокращай руками или подними цель.")
     if not chunks:
-        print("После отсева чёрного не осталось ни одного куска.")
+        print("Под заданный хронометраж не подошёл ни один кусок.")
         return 1
 
     rows = []
@@ -696,6 +826,11 @@ def run_multicam(args) -> int:
     CAMS = {"wide": (wide, args.wide_plan, "ведущий"),
             "gcam": (gcam, args.guest_plan, "гость")}
     chunks, n_black, n_swap = plan_cameras(chunks, wide, gcam, out)
+    chunks, dropped_time, _ = fit_to_target(
+        chunks, parse_duration(args.target))
+    if dropped_time:
+        print(f"Хронометраж {args.target}: вырезано {len(dropped_time)} кусков "
+              f"под цель {parse_duration(args.target) / 60:.1f} мин")
 
     def susp(text):
         # короткие куски — под вопросом: программа их оставляет, но метит
@@ -754,6 +889,11 @@ def run_multicam(args) -> int:
         f"Стыков прикрыто: {n_joints if broll else 0} из {n_joints}."
         + ("" if broll else " (нет --broll — закрой вручную)"),
         f"Без картинки выброшено: {n_black}. Взят запасной ракурс: {n_swap}.",
+        *([f"Под хронометраж {args.target} вырезано: {len(dropped_time)} кусков "
+           f"({sum(o - i for i, o, *_ in dropped_time):.1f}с).",
+           "ВЫРЕЗАННОЕ (техническое и слабое по смыслу — глянь, не пропало ли нужное):",
+           *[f"  {i:.1f}-{o:.1f}с [{sp}] «{t[:70]}»" for i, o, sp, t, _ in dropped_time[:25]],
+           ""] if dropped_time else []),
         "",
         "СОМНИТЕЛЬНЫЕ (короткие — глянь, нужны ли; помечены [?] в selects):",
         *[f"  {i:.1f}-{o:.1f} [{sp}] «{text[:80]}»" for i, o, sp, text, _ in
@@ -812,6 +952,9 @@ def main(argv=None) -> int:
                     help="только транскрипт с номерами (правка текста до сборки)")
     ap.add_argument("--from-transcript", default="",
                     help="собрать selects из правленого transcript.txt (мультикамера)")
+    ap.add_argument("--target", default="",
+                    help="хронометраж готового: «10:00» или «600». "
+                         "Пусто - без ограничения")
     args = ap.parse_args(argv)
 
     if args.wide or args.guest_mic or args.host_mic:
