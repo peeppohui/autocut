@@ -254,7 +254,9 @@ ok("у сюжета есть автозаполнение полей", "Подс
 # --- ни один блок не отправляет в другой ---
 # Правило владельца: блок самодостаточен, работать надо в том, который
 # нужен. Текст «сначала прогони другой блок» в интерфейсе - брак.
-OTHERS = ["Интервью 2 камеры", "Новостной сюжет", "Мультикам", "Дайджест",
+# «Мультикам» тут нет: это уже не блок, а карточка внутри интервью,
+# и упоминать её название внутри страницы - нормально.
+OTHERS = ["Интервью 2 камеры", "Новостной сюжет", "Дайджест",
           "Интервью 1 видео", "Проверка готового"]
 for _name in [n for n, _ in A.TPL if n not in ("Настройки", "Ход работы")]:
     app.show(_name)
@@ -267,8 +269,10 @@ for _name in [n for n, _ in A.TPL if n not in ("Настройки", "Ход р�
     _bad = [o for o in OTHERS if o != _name and o in _txt]
     ok(f"«{_name}» не отправляет в другой блок", not _bad, str(_bad))
 
-# блоки, которым нужна синхронизация, должны уметь сделать её сами
-for _name in ("Мультикам", "Новостной сюжет"):
+# блоки, которым нужна синхронизация, должны уметь сделать её сами.
+# У интервью синхронизация идёт первым шагом «Собрать рыбы»,
+# у сюжета - своей кнопкой.
+for _name in ("Новостной сюжет",):
     app.show(_name)
     app.update_idletasks()
     _btns = [w.cget("text") for w in all_widgets(app.host.winfo_children()[0])
@@ -313,6 +317,33 @@ ok("отдельной страницы «Таймлайн» не осталос
    not any(n == "Таймлайн" for n, _ in A.TPL))
 ok("отдельной страницы «Просмотр» не осталось",
    not any(n == "Просмотр" for n, _ in A.TPL))
+# мультикам - второй способ разложить две камеры, отдельный пункт не нужен
+ok("отдельного блока «Мультикам» не осталось",
+   not any(n == "Мультикам" for n, _ in A.TPL))
+
+app.show("Интервью 2 камеры")
+app.update_idletasks()
+_mc_txt = " ".join(
+    w.cget("text") for w in all_widgets(app.host.winfo_children()[0])
+    if isinstance(w, (A.ctk.CTkLabel, A.ctk.CTkButton))
+    and w.cget("text") and isinstance(w.cget("text"), str))
+_mc_btns = [w.cget("text") for w in all_widgets(app.host.winfo_children()[0])
+            if isinstance(w, A.ctk.CTkButton)]
+ok("мультикам живёт в двухкамерном интервью",
+   "Мультикам в Premiere" in _mc_txt, _mc_txt[:120])
+ok("внутри есть подготовка камер",
+   "Подготовить камеры" in _mc_btns, str(_mc_btns))
+ok("и папка synced подставляется сама", "Подставить" in _mc_btns,
+   str(_mc_btns))
+# в одно-камерном интервью мультикаму нечего готовить
+app.show("Интервью 1 видео")
+app.update_idletasks()
+_one_txt = " ".join(
+    w.cget("text") for w in all_widgets(app.host.winfo_children()[0])
+    if isinstance(w, (A.ctk.CTkLabel, A.ctk.CTkButton))
+    and w.cget("text") and isinstance(w.cget("text"), str))
+ok("в одной камере мультикама нет",
+   "Мультикам в Premiere" not in _one_txt, _one_txt[:120])
 
 with_panel = []
 for n, _ in A.TPL:

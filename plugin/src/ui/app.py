@@ -46,6 +46,7 @@ import theme as T                            # noqa: E402
 import settings                              # noqa: E402
 import pages_news                            # noqa: E402
 import panel_result                          # noqa: E402
+import card_multicam                         # noqa: E402
 
 
 # ==================================================================
@@ -428,141 +429,9 @@ def page_multi(parent, app):
     T.btn(row, "Собрать из правленого текста", "ghost",
           command=run_from_tx).pack(side="left", padx=10)
     panel_result.add_to(wrap, app, out, two_cam)
-    return wrap
-
-
-def page_mc(parent, app):
-    """Подготовка камер к настоящему мультикаму Premiere.
-
-    Premiere умеет строить мультикам сам, если у файлов совпадает
-    таймкод. Всё, что делаем мы, - впечатываем метку: видео при
-    этом не перекодируется, файлы просто копируются с таймкодом.
-
-    Блок самодостаточный: синхронизация камер живёт здесь же. Раньше
-    страница просила «готовые синхроны из папки synced», а взять их
-    было только в другом блоке - то есть работать здесь было нельзя.
-    """
-    wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-
-    dst = T.card(wrap, "Куда сложить", "Синхронизация и копии лягут сюда")
-    proj = ctk.StringVar(value=str(BASE / "multicam_out"))
-    T.field(dst, 0, "Папка проекта", proj,
-            browse=lambda: app.pick_dir(proj, "Куда сложить"))
-
-    # ------------------------------------------- 1. синхронизация
-    prep = T.card(wrap, "1. Синхронизировать камеры",
-                  "Свои файлы. Хлопок не нужен - камеры встают по звуку")
-    wide = ctk.StringVar()
-    cam2 = ctk.StringVar()
-    mic1 = ctk.StringVar()
-    mic2 = ctk.StringVar()
-    T.field(prep, 0, "Общий план", wide, "камера 1, со звуком",
-            browse=lambda: app.pick_file(wide, "Общий план"))
-    T.field(prep, 1, "Камера 2", cam2, "вторая камера, если есть",
-            browse=lambda: app.pick_file(cam2, "Камера 2"))
-    T.field(prep, 2, "Микрофон 1", mic1, "*.wav",
-            browse=lambda: app.pick_file(mic1, "Микрофон 1",
-                                         [("Звук", "*.wav *.mp3")]))
-    T.field(prep, 3, "Микрофон 2", mic2, "необязательно",
-            browse=lambda: app.pick_file(mic2, "Микрофон 2",
-                                         [("Звук", "*.wav *.mp3")]))
-    dev = T.device_row(prep, 4)
-    prep_note = ctk.CTkLabel(prep, text="", text_color=T.MUTED, anchor="w",
-                             font=T.font(11), wraplength=620,
-                             justify="left")
-    prep_note.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
-
-    # ------------------------------------------- 2. камеры
-    src = T.card(wrap, "2. Камеры для мультикама",
-                 "Подставляется из папки проекта после синхронизации")
-    folder = ctk.StringVar()
-    T.field(src, 0, "Папка synced", folder,
-            r"нажми «Подставить»",
-            browse=lambda: app.pick_dir(folder, "Папка synced"))
-    tc = T.field(src, 1, "Начало таймкода", ctk.StringVar(value="01:00:00:00"),
-                 "одинаковый для всех камер")
-
-    how = T.card(wrap, "Что произойдёт",
-                 "Мультикам строится самим Premiere, вручную")
-    # многострочные подписи - через pack: в grid строки с текстом
-    # разной высоты наезжают друг на друга
-    for text in (
-        "1. Каждой камере делается копия с одинаковым таймкодом.\n"
-        "   Копия нужна, чтобы не трогать оригиналы; видео при этом\n"
-        "   НЕ перекодируется - только метка, это быстро.",
-        "2. Папку с копиями импортируешь в Premiere, выделяешь все\n"
-        "   файлы и жмёшь: ПКМ > Multi-Camera > Create Multicam Sequence.",
-        "3. В окне выбираешь Synchronize Point: Timecode. Всё, ракурсы\n"
-        "   встанут друг на друга сами.",
-    ):
-        ctk.CTkLabel(how, text=text, text_color=T.MUTED, anchor="w",
-                     justify="left", font=T.font(12)).pack(
-                         anchor="w", pady=4)
-
-    def synced_dir():
-        return Path(proj.get().strip().strip('"')
-                    or str(BASE / "multicam_out")) / "synced"
-
-    def autofill():
-        f = synced_dir()
-        if not f.is_dir():
-            prep_note.configure(text="Папки synced пока нет. "
-                                    "Заполни камеры и нажми «Синхронизировать».",
-                                text_color=T.MUTED)
-            return False
-        n = len([p for p in f.glob("*")
-                 if p.suffix.lower() in (".mp4", ".mov", ".mxf", ".mkv")])
-        folder.set(str(f))
-        prep_note.configure(text=f"Готово: {n} камер в папке проекта",
-                            text_color=T.SUCCESS if n else T.MUTED)
-        return n > 0
-
-    def do_sync():
-        w = app.need(wide, "общий план")
-        if not w:
-            return
-        argv = [str(ML / "sync.py"), "--ref", w, "--outdir", str(synced_dir())]
-        c = cam2.get().strip().strip('"')
-        if c and Path(c).is_file():
-            argv += ["--cam", c]
-        for mic in (mic1, mic2):
-            m = mic.get().strip().strip('"')
-            if m and Path(m).is_file():
-                argv += ["--mic-guest" if mic is mic1 else "--mic-host", m]
-        app.go([("Синхронизация", argv)], str(synced_dir()))
-
-    def run():
-        f = Path(folder.get().strip().strip('"'))
-        if not f.is_dir():
-            app.warn("Папка synced не найдена. Нажми «Подставить» "
-                     "или «Синхронизировать».")
-            return
-        vids = sorted(p for p in f.glob("*")
-                      if p.suffix.lower() in (".mp4", ".mov", ".mxf", ".mkv"))
-        if not vids:
-            app.warn("В папке нет видео. Сначала нажми «Синхронизировать».")
-            return
-        out = f.parent / "multicam"
-        app.go([("Готовлю камеры к мультикаму",
-                 [str(ML / "multicam.py"),
-                  "--input", *[str(v) for v in vids],
-                  "--outdir", str(out),
-                  "--timecode", tc.get().strip() or "01:00:00:00"])],
-               str(out))
-
-    prow = ctk.CTkFrame(prep, fg_color="transparent")
-    prow.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 8))
-    T.btn(prow, "Синхронизировать", "ghost", width=190,
-          command=do_sync).pack(side="left")
-    T.btn(prow, "Подставить", "primary", width=150,
-          command=autofill).pack(side="left", padx=10)
-    ctk.CTkLabel(prow, text="← берёт папку synced из папки проекта",
-                 text_color=T.FAINT, font=T.font(11)).pack(side="left",
-                                                           padx=10)
-
-    T.btn(wrap, "Подготовить камеры", "primary", width=220,
-          command=run).pack(anchor="w", padx=T.PAD, pady=(0, T.PAD))
-    autofill()
+    # мультикам — второй способ разложить те же две камеры, поэтому
+    # живёт здесь, а не отдельным пунктом меню
+    card_multicam.multicam_card(wrap, app, out)
     return wrap
 
 
@@ -819,7 +688,6 @@ def page_log(parent, app):
 SUBS = {
     "Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
     "Новостной сюжет": "Лид, суть, синхроны, детали и финал по мероприятию",
-    "Мультикам": "Настоящий мультикам в Premiere по общему таймкоду",
     "Настройки": "Пороги чистки речи и раскладки кадров",
     "Ход работы": "Что делает программа прямо сейчас",
     "Дайджест": "Папка исходников → раскладка по планам",
@@ -827,13 +695,12 @@ SUBS = {
     "Проверка готового": "Что лежит в собранном монтаже",
 }
 
-# Отдельных страниц «Таймлайн» и «Просмотр» больше нет. Разбор монтажа
-# живёт внутри блока, который его собрал: чтобы посмотреть дорожки,
-# не нужно гадать, в какой папке лежит результат.
+# Отдельных страниц «Таймлайн», «Просмотр» и «Мультикам» больше нет.
+# Разбор монтажа живёт внутри блока, который его собрал; мультикам —
+# внутри блока с двумя камерами, потому что отдельно он бессмыслен.
 TPL = [
     ("Интервью 2 камеры", page_multi),
     ("Новостной сюжет", pages_news.page_news),
-    ("Мультикам", page_mc),
     ("Настройки", page_settings),
     ("Ход работы", page_log),
     ("Дайджест", page_digest),
@@ -845,7 +712,6 @@ TPL = [
 GROUPS = [
     ("Основное", [("Интервью 2 камеры", page_multi),
                   ("Новостной сюжет", pages_news.page_news),
-                  ("Мультикам", page_mc),
                   ("Настройки", page_settings),
                   ("Ход работы", page_log)]),
     ("Другие шаблоны", [("Дайджест", page_digest),
