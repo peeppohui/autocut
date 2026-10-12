@@ -93,18 +93,29 @@ else:
              "-show_streams", str(dst)], capture_output=True, text=True)
         import json
         bs = json.loads(before.stdout)["streams"][0]
-        as_ = json.loads(after.stdout)["streams"][0]
+        all_after = json.loads(after.stdout)["streams"]
+        as_ = next(s for s in all_after if s["codec_type"] == "video")
         eq("разрешение не поехало",
            as_.get("width"), bs.get("width"))
         eq("кадров в секунду не поехало",
            as_.get("r_frame_rate"), bs.get("r_frame_rate"))
         ok("длительность не поехала",
            as_.get("duration"), bs.get("duration"))
-        # -c copy не должен раздувать файл: если размер вырос в разы,
-        # значит видео перекодировалось, а это ровно то, чего мы добиваемся
-        grew = dst.stat().st_size / max(1, small.stat().st_size)
-        ok("файл почти не вырос (copy, не перекод)", grew < 1.02,
-           f"вырос в {grew:.3f} раза")
+
+        # -c copy значит, что видеопоток должен остаться побайтово
+        # прежним. Мерить весь файл нельзя: ffmpeg добавляет служебную
+        # дорожку таймкода, и на секундном обрывке это заметно, хотя
+        # на получасовой записи - копейки.
+        vsize = lambda streams: sum(  # noqa: E731
+            int(s.get("codec_size") or s.get("bit_rate") or 0)
+            for s in streams if s["codec_type"] == "video")
+        ok("видеопоток не перекодирован",
+           vsize(all_after) <= vsize([bs]) * 1.02,
+           f"{vsize(all_after)} против {vsize([bs])}")
+        ok("появилась дорожка таймкода",
+           any(s["codec_type"] not in ("video", "audio")
+               for s in all_after),
+           str([s["codec_type"] for s in all_after]))
 
 print()
 if fail:

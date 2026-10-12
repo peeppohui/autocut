@@ -55,70 +55,19 @@ with tempfile.TemporaryDirectory() as td:
     clips = premiere.resolve_media(
         premiere.load_timeline(csv_path), td)
 
-    # --- без флага: обычная секвенция, как раньше ---
+    # --- обычная секвенция: у клипов на месте файлы ---
     plain = premiere.build_fcp7(list(clips), fps=25)
-    ok("без флага мультикамов нет", len(plain.findall(".//multiclip")) == 0,
-       str(len(plain.findall(".//multiclip"))))
-    ok("без флага файлы у клипов на месте",
+    ok("у клипов на месте файлы",
        len(plain.findall(".//video/track/clipitem/file")) == 2)
 
-    # --- с флагом: мультикам ---
-    mc = premiere.build_fcp7(list(clips), fps=25, multicam=True)
-    mcs = mc.findall(".//multiclip")
-    ok("мультикамов столько же, сколько видеоклипов", len(mcs) == 2, str(len(mcs)))
-
-    for i, m in enumerate(mcs, 1):
-        angles = m.findall("angle")
-        if len(angles) != 2:
-            ok(f"мультикам {i}: два угла", False, str(len(angles)))
-            continue
-        ok(f"мультикам {i}: два угла", True)
-
-        ins = [a.find("clip/in").text for a in angles]
-        outs = [a.find("clip/out").text for a in angles]
-        ok(f"мультикам {i}: у углов одинаковый in", len(set(ins)) == 1, str(ins))
-        ok(f"мультикам {i}: у углов одинаковый out", len(set(outs)) == 1, str(outs))
-
-        active = [a for a in angles
-                  if a.find("activevideoangle") is not None]
-        ok(f"мультикам {i}: ровно один активный угол", len(active) == 1,
-           str(len(active)))
-
-        files = [a.find("clip/file/pathurl").text for a in angles]
-        ok(f"мультикам {i}: углы ссылаются на разные файлы",
-           len(set(files)) == 2, str(files))
-
-        # у активного угла должен быть именно тот файл, что выбрал авто-монтаж
-        want = "cam.mp4" if i == 1 else "ref.mp4"
-        got = active[0].find("clip/name").text if active else ""
-        ok(f"мультикам {i}: активен угол говорящего", got == want,
-           f"активен {got}, ждали {want}")
-
-    ok("synctype = 1 (по In)", all(
-        m.find("synctype").text == "1" for m in mcs))
-    ok("mediadelay проставлен", all(
-        c.find("mediadelay") is not None
-        for c in mc.findall(".//video/track/clipitem")))
-
     # --- целостность XML ---
-    ids = [e.get("id") for e in mc.iter() if e.get("id")]
+    ids = [e.get("id") for e in plain.iter() if e.get("id")]
     ok("нет дублей id", len(ids) == len(set(ids)),
        f"{len(ids)} против {len(set(ids))}")
-    refs = {l.text for l in mc.iter("linkclipref")}
+    refs = {l.text for l in plain.iter("linkclipref")}
     ok("нет висячих ссылок", not (refs - set(ids)), str(sorted(refs - set(ids))))
-    ok("check_xml доволен", not premiere.check_xml(mc),
-       str(premiere.check_xml(mc)))
-
-    # --- если второго ракурса нет, мультикам не строится ---
-    # важно: глубокая копия. list() копирует только список, а словари
-    # остаются те же - и обнуление alt уезжало в исходные данные
-    clips2 = copy.deepcopy(clips)
-    clips2[0]["alt"] = ""
-    clips2[0]["alt_path"] = ""
-    mc2 = premiere.build_fcp7(clips2, fps=25, multicam=True)
-    ok("без второго ракурса - обычный клип",
-       len(mc2.findall(".//multiclip")) == 1,
-       str(len(mc2.findall(".//multiclip"))))
+    ok("check_xml доволен", not premiere.check_xml(plain),
+       str(premiere.check_xml(plain)))
 
     # =========================================================
     # --stacked: две дорожки вместо multiclip

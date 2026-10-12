@@ -111,7 +111,7 @@ def load_timeline(path: Path) -> List[Dict]:
                 # A2/A3/... для звука без картинки (подложка, закадр)
                 "track": (row.get("track") or "").strip().upper(),
                 # второй ракурс того же момента - из него premiere.py
-                # собирает мультикам (--multicam). Пусто = одна камера.
+                # кладёт вторую дорожку (--stacked). Пусто = одна камера.
                 "alt": (row.get("alt") or "").strip(),
                 "alt_path": (row.get("alt_path") or "").strip(),
             })
@@ -239,49 +239,17 @@ def _audio_file_el(fid: str, c: Dict, orig: int, fps: int) -> ET.Element:
     return f
 
 
-def _multiclip_el(parent, mc_name, angles, src_in, src_out, fps, orig):
-    """Собирает <multiclip> - так в FCP7 XML описывается мультикамера.
-
-    angles: [(имя файла, абсолютный путь, активен ли)] - активный угол идёт
-    первым, тогда Premiere покажет именно его, даже если флаги не прочтёт.
-
-    Углы синхронизированы по In: обе камеры лежат на общей шкале времени,
-    поэтому обеим углам подходит одна и та же пара in/out.
-    """
-    mc = ET.SubElement(parent, "multiclip")
-    ET.SubElement(mc, "name").text = mc_name
-    for fname, abspath, active in angles:
-        ang = ET.SubElement(mc, "angle")
-        if active:
-            ET.SubElement(ang, "activevideoangle").text = "TRUE"
-        clip = ET.SubElement(ang, "clip", id=f"angle-{fname}-{abs(src_in)}")
-        ET.SubElement(clip, "name").text = fname
-        ET.SubElement(clip, "duration").text = str(orig)
-        clip.append(_rate_el(fps))
-        ET.SubElement(clip, "in").text = str(src_in)
-        ET.SubElement(clip, "out").text = str(src_out)
-        clip.append(_video_file_el(f"anglefile-{fname}-{abs(src_in)}",
-                                   {"file": fname, "abspath": abspath},
-                                   orig, fps, None, None))
-    ET.SubElement(mc, "synctype").text = "1"   # синхронизация по In
-    return mc
-
-
 def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
                height: int = None,
                seq_name: str = None, trim_rec: bool = False,
                audios: Optional[List[str]] = None,
-               markers: bool = None, multicam: bool = False,
-               stacked: bool = False,
-               multicam_name: str = None) -> ET.Element:
+               markers: bool = None, stacked: bool = False) -> ET.Element:
     fps = EXPORT_FPS if fps is None else fps
     width = EXPORT_WIDTH if width is None else width
     height = EXPORT_HEIGHT if height is None else height
     seq_name = settings.get("project.sequence_name", "AutoCut") if seq_name is None else seq_name
     if markers is None:
         markers = bool(settings.get("export.markers", True))
-    if multicam_name is None:
-        multicam_name = settings.get("export.multicam_name", "AutoCut multicam")
     xmeml = ET.Element("xmeml", version="5")
     seq = ET.SubElement(xmeml, "sequence", id="sequence-1", name=seq_name)
     ET.SubElement(seq, "name").text = seq_name
@@ -435,8 +403,8 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             ET.SubElement(vi, "pixelaspectratio").text = "square"
             ET.SubElement(vi, "anamorphic").text = "FALSE"
 
-            alt = c.get("alt") if (multicam or stacked) else ""
-            alt_path = c.get("alt_path") if (multicam or stacked) else ""
+            alt = c.get("alt") if stacked else ""
+            alt_path = c.get("alt_path") if stacked else ""
             if stacked and alt and alt_path and Path(alt_path).exists():
                 # Второй ракурс кладём на дорожку ПОД основной: верхний
                 # показывает основной кадр, нижний переключается через
@@ -471,15 +439,6 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
                 ET.SubElement(logging_u, "lognote").text = (
                     "второй ракурс: Edit > Toggle Switches, "
                     "либо клик по глазку дорожки")
-            elif alt and alt_path and Path(alt_path).exists():
-                # Мультикам: два угла того же момента. Активным идёт тот,
-                # кого выбрал авто-монтаж (говорящий), второй можно
-                # переключить в Premiere кликом по углу.
-                angles = [(c["file"], c["abspath"], True),
-                          (alt, alt_path, False)]
-                _multiclip_el(vi, multicam_name, angles, src_in, src_out,
-                              fps, orig)
-                ET.SubElement(vi, "mediadelay").text = "0"
             else:
                 vi.append(_video_file_el(f"file-{i}v", c, orig, fps,
                                          width, height))
@@ -638,10 +597,6 @@ def main(argv=None) -> int:
     ap.add_argument("--stacked", action="store_true",
                     help="второй ракурс на отдельной видеодорожке под основной. "
                          "Переключение: Edit > Toggle Switches")
-    ap.add_argument("--multicam", action="store_true",
-                    help="собрать мультикам: оба ракурса одним клипом, "
-                         "переключать можно прямо в Premiere. Нужна колонка "
-                         "alt в таймлайне (её даёт interview.py)")
     ap.add_argument("--no-markers", action="store_true",
                     help="не ставить маркеры с причинами склейки")
     ap.add_argument("--trim-rec", action="store_true",
@@ -686,7 +641,7 @@ def main(argv=None) -> int:
 
     root = build_fcp7(clips, fps=args.fps, width=args.width, height=args.height,
                       seq_name=args.name, trim_rec=args.trim_rec, audios=audios,
-                      markers=not args.no_markers, multicam=args.multicam,
+                      markers=not args.no_markers,
                       stacked=args.stacked)
     problems = check_xml(root)
     if problems:

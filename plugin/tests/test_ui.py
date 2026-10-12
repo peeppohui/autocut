@@ -67,8 +67,14 @@ if not _P(FAKE).exists():          # проект переехал - тест н
     FAKE = str(_P.home())
 
 # --- все страницы собираются и не пустые ---
+# число берём из GROUPS, а не пишем константой: добавили «Мультикам» -
+# и тест молча продолжил бы проверять старое количество
 names = [n for _, items in A.GROUPS for n, _ in items]
-ok("все страницы в навигации", len(names) == 7, str(len(names)))
+tpl = [n for n, _ in A.TPL]
+ok("страницы в навигации совпадают со списком",
+   sorted(names) == sorted(tpl),
+   f"{sorted(names)} против {sorted(tpl)}")
+ok("навигация не пустая", len(names) >= 7, str(len(names)))
 empty = []
 for n in names:
     app.show(n)

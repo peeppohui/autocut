@@ -33,7 +33,8 @@ import settings
 
 # Метки, которые interview.py ставит в desc: [?] короткий кусок,
 # [~] спорный по микрофонам. В субтитрах они лишние.
-FLAG_RX = re.compile(r"^\s*(?:\[[~?!]+\]|~|\?)\s*")
+BRACKET_FLAG_RX = re.compile(r"\[[~?!*]+\]")
+FLAG_RX = re.compile(r"^\s*(?:\[[~?!*]+\]|~|\?)\s*")
 SPEAKER_RX = re.compile(r"^\s*(ГОСТЬ|ВЕДУЩИЙ|ГOST|HOST)\s*:\s*", re.IGNORECASE)
 
 # Служебные подписи таймлайна: попадают в desc, но не являются речью.
@@ -61,14 +62,21 @@ def fmt_time(seconds: float) -> str:
 def clean_text(text: str, drop_speaker: bool = True) -> str:
     """Убирает служебные метки и имя спикера.
 
-    Сначала имя спикера, потом метку: в колонке desc метка стоит ПОСЛЕ
-    имени ("ГОСТЬ: [!] текст"), и при обратном порядке она доходила
-    до субтитров вместе с закрывающей скобкой.
+    Схемы в колонке desc разные: «[~] ГОСТЬ: текст» и «ГОСТЬ: [~] текст».
+    Поэтому снимаем и то и другое по кругу, пока строка не перестанет
+    меняться. Метки в скобках убираем отовсюду, а не только в начале:
+    при drop_speaker=False имя спикера остаётся, и метка оказывается
+    уже не в начале строки.
     """
     t = (text or "").strip()
-    if drop_speaker:
-        t = SPEAKER_RX.sub("", t)
-    t = FLAG_RX.sub("", t).strip()
+    for _ in range(4):
+        before = t
+        if drop_speaker:
+            t = SPEAKER_RX.sub("", t)
+        t = BRACKET_FLAG_RX.sub("", t)
+        t = t.strip()
+        if t == before:
+            break
     return re.sub(r"\s+", " ", t).strip()
 
 

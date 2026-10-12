@@ -178,6 +178,13 @@ _keep = []
 
 
 def _photo(path: Path, width: int):
+    """Читает PNG и уменьшает до нужной ширины.
+
+    Это обычный PhotoImage, а не CTkImage: CTkImage умеет масштабироваться
+    на экранах с увеличением, но требует Pillow, которого у нас нет.
+    Пока экрана 100% - разницы не видно. Если AutoCut поедет на ноутбуке
+    с HighDPI, правильное решение - поставить Pillow и перейти на CTkImage.
+    """
     if not path.is_file():
         return None
     try:
@@ -186,7 +193,7 @@ def _photo(path: Path, width: int):
         return None
     if img.width() > width:
         img = img.subsample(max(1, img.width() // width))
-    _keep.append(img)
+    _keep.append(img)      # без ссылки сборщик мусора уберёт картинку
     return img
 
 
