@@ -154,6 +154,56 @@ with tempfile.TemporaryDirectory() as td:
        all("totalExplodedTrackCount" not in tr.attrib for tr in at),
        str([tr.attrib for tr in at]))
 
+    # =========================================================
+    # Перебивка без микрофона: звук нужен, поэтому она линкуется сама
+    # на свой файл и встаёт на отдельную дорожку. Это осознанное
+    # решение (см. AGENTS.md), а не случайность: нельзя «починить»
+    # клиент без звука перебивки, потому что в новостном сюжете он
+    # нужен редактору.
+    # =========================================================
+    broll = td / "broll.mp4"
+    broll.write_bytes(b"\x00" * 16)
+    vo = td / "vo.wav"
+    vo.write_bytes(b"\x00" * 16)
+
+    story = td / "story.csv"
+    with open(story, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["file", "plan", "hero", "duration", "in", "out",
+                    "desc", "path", "audio", "track"])
+        # синхрон: микрофон прописан явно
+        w.writerow(["cam.mp4", "средний2", "гость", 4.0, 10, 110,
+                    "ГОСТЬ: речь", str(a), str(mic), "V1"])
+        # перебивка: колонка audio пуста, но звук у неё нужен
+        w.writerow(["broll.mp4", "", "", 3.0, 0, 30,
+                    "перебивка", str(broll), "", "V1"])
+        # закадр: самостоятельная звуковая дорожка
+        w.writerow(["vo.wav", "", "закадр", 5.0, 0, 125,
+                    "закадр", str(vo), "", "A2"])
+
+    story_clips = premiere.resolve_media(
+        premiere.load_timeline(story), td)
+    story_xml = premiere.build_fcp7(list(story_clips), fps=25)
+    st_at = story_xml.findall(".//audio/track")
+    st_names = [sorted({c.findtext("name") for c in tr.findall("clipitem")})
+                for tr in st_at]
+
+    ok("перебивка получила свою звуковую дорожку",
+       ["broll.mp4"] in st_names, str(st_names))
+    ok("микрофон синхрона остался на своей дорожке",
+       ["_guest.wav"] in st_names, str(st_names))
+    ok("закадр не потерялся", ["vo.wav"] in st_names, str(st_names))
+    ok("три звуковые дорожки: синхрон, перебивка, закадр",
+       len(st_at) == 3, str(len(st_at)))
+    # самостоятельные дорожки объявляются после связанных, поэтому
+    # закадр с колонкой A2 физически встаёт на A3. Номера из settings
+    # описывают пожелание, а не адрес в готовой секвенции.
+    ok("закадр объявлен после связанного звука",
+       st_names.index(["vo.wav"]) == 2, str(st_names))
+    ok("у сюжета не осталось totalExplodedTrackCount",
+       all("totalExplodedTrackCount" not in tr.attrib for tr in st_at),
+       str([tr.attrib for tr in st_at]))
+
 print()
 if fail:
     print(f"MULTICAM FAIL ({len(fail)}): {fail}")
