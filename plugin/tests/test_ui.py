@@ -251,6 +251,60 @@ ok("у сюжета своё распознавание речи", "Распоз
 ok("у сюжета есть автозаполнение полей", "Подставить" in _buttons,
    str(_buttons))
 
+# --- ни один блок не отправляет в другой ---
+# Правило владельца: блок самодостаточен, работать надо в том, который
+# нужен. Текст «сначала прогони другой блок» в интерфейсе - брак.
+OTHERS = ["Интервью 2 камеры", "Новостной сюжет", "Мультикам", "Дайджест",
+          "Интервью 1 видео", "Проверка готового"]
+for _name in [n for n, _ in A.TPL if n not in ("Настройки", "Ход работы")]:
+    app.show(_name)
+    app.update_idletasks()
+    _pg = app.host.winfo_children()[0]
+    _txt = " ".join(
+        w.cget("text") for w in all_widgets(_pg)
+        if isinstance(w, (A.ctk.CTkLabel, A.ctk.CTkButton))
+        and w.cget("text") and isinstance(w.cget("text"), str))
+    _bad = [o for o in OTHERS if o != _name and o in _txt]
+    ok(f"«{_name}» не отправляет в другой блок", not _bad, str(_bad))
+
+# блоки, которым нужна синхронизация, должны уметь сделать её сами
+for _name in ("Мультикам", "Новостной сюжет"):
+    app.show(_name)
+    app.update_idletasks()
+    _btns = [w.cget("text") for w in all_widgets(app.host.winfo_children()[0])
+             if isinstance(w, A.ctk.CTkButton)]
+    ok(f"«{_name}» умеет синхронизировать сам",
+       "Синхронизировать" in _btns, str(_btns))
+
+# «Интервью 1 видео»: поле перебивок было мёртвым - объявлено, но в
+# интервью не передавалось. Теперь подключено и есть кнопка, делающая CSV.
+app.show("Интервью 1 видео")
+app.update_idletasks()
+_btns1 = [w.cget("text") for w in all_widgets(app.host.winfo_children()[0])
+          if isinstance(w, A.ctk.CTkButton)]
+ok("одна камера умеет искать перебивки сама",
+   "Найти перебивки" in _btns1, str(_btns1))
+
+_bcsv = _P(tempfile.mkdtemp()) / "broll.csv"
+_bcsv.write_text("file,plan,hero,duration,desc,conf,path\n"
+                 "b1.mp4,крупный,,-,перебивка,0.9,%s\n"
+                 % (_bcsv.parent / "b1.mp4"), encoding="utf-8")
+_ONE_DIR = str(_P(FAKE).parent)
+
+fill_and_press("Интервью 1 видео", "Собрать рыбу",
+               [str(FAKE), _ONE_DIR, "", str(_bcsv)])
+ok("одна камера: шаги по порядку",
+   [t for t, _ in captured[-1]] == ["1. Рыба по тексту", "2. XML для Premiere",
+                                    "3. Субтитры"], str([t for t, _ in captured[-1]]))
+argv1 = dict(captured[-1])["1. Рыба по тексту"]
+ok("CSV перебивок реально передаётся в интервью",
+   "--broll" in argv1 and str(_bcsv) in argv1, str(argv1))
+
+fill_and_press("Интервью 1 видео", "Собрать рыбу",
+               [str(FAKE), _ONE_DIR, "", ""])
+argv2 = dict(captured[-1])["1. Рыба по тексту"]
+ok("без перебивок шаг тоже собирается", "--broll" not in argv2, str(argv2))
+
 # --- разбор монтажа встроен в блоки сборки ---
 # Отдельных страниц «Таймлайн» и «Просмотр» больше нет: разбор должен
 # лежать в том же блоке, который собрал монтаж.

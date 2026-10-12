@@ -437,13 +437,48 @@ def page_mc(parent, app):
     Premiere умеет строить мультикам сам, если у файлов совпадает
     таймкод. Всё, что делаем мы, - впечатываем метку: видео при
     этом не перекодируется, файлы просто копируются с таймкодом.
+
+    Блок самодостаточный: синхронизация камер живёт здесь же. Раньше
+    страница просила «готовые синхроны из папки synced», а взять их
+    было только в другом блоке - то есть работать здесь было нельзя.
     """
     wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
 
-    src = T.card(wrap, "Камеры", "Берём готовые синхроны из папки synced")
-    folder = T.field(src, 0, "Папка synced", ctk.StringVar(),
-                     "папка проекта\\synced",
-                     browse=lambda: app.pick_dir(folder, "Папка synced"))
+    dst = T.card(wrap, "Куда сложить", "Синхронизация и копии лягут сюда")
+    proj = ctk.StringVar(value=str(BASE / "multicam_out"))
+    T.field(dst, 0, "Папка проекта", proj,
+            browse=lambda: app.pick_dir(proj, "Куда сложить"))
+
+    # ------------------------------------------- 1. синхронизация
+    prep = T.card(wrap, "1. Синхронизировать камеры",
+                  "Свои файлы. Хлопок не нужен - камеры встают по звуку")
+    wide = ctk.StringVar()
+    cam2 = ctk.StringVar()
+    mic1 = ctk.StringVar()
+    mic2 = ctk.StringVar()
+    T.field(prep, 0, "Общий план", wide, "камера 1, со звуком",
+            browse=lambda: app.pick_file(wide, "Общий план"))
+    T.field(prep, 1, "Камера 2", cam2, "вторая камера, если есть",
+            browse=lambda: app.pick_file(cam2, "Камера 2"))
+    T.field(prep, 2, "Микрофон 1", mic1, "*.wav",
+            browse=lambda: app.pick_file(mic1, "Микрофон 1",
+                                         [("Звук", "*.wav *.mp3")]))
+    T.field(prep, 3, "Микрофон 2", mic2, "необязательно",
+            browse=lambda: app.pick_file(mic2, "Микрофон 2",
+                                         [("Звук", "*.wav *.mp3")]))
+    dev = T.device_row(prep, 4)
+    prep_note = ctk.CTkLabel(prep, text="", text_color=T.MUTED, anchor="w",
+                             font=T.font(11), wraplength=620,
+                             justify="left")
+    prep_note.grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+    # ------------------------------------------- 2. камеры
+    src = T.card(wrap, "2. Камеры для мультикама",
+                 "Подставляется из папки проекта после синхронизации")
+    folder = ctk.StringVar()
+    T.field(src, 0, "Папка synced", folder,
+            r"нажми «Подставить»",
+            browse=lambda: app.pick_dir(folder, "Папка synced"))
     tc = T.field(src, 1, "Начало таймкода", ctk.StringVar(value="01:00:00:00"),
                  "одинаковый для всех камер")
 
@@ -464,20 +499,48 @@ def page_mc(parent, app):
                      justify="left", font=T.font(12)).pack(
                          anchor="w", pady=4)
 
-    note = ctk.CTkLabel(wrap, text="", text_color=T.SUCCESS, anchor="w",
-                        font=T.font(12))
-    note.pack(anchor="w", padx=T.PAD, pady=(0, 10))
+    def synced_dir():
+        return Path(proj.get().strip().strip('"')
+                    or str(BASE / "multicam_out")) / "synced"
+
+    def autofill():
+        f = synced_dir()
+        if not f.is_dir():
+            prep_note.configure(text="Папки synced пока нет. "
+                                    "Заполни камеры и нажми «Синхронизировать».",
+                                text_color=T.MUTED)
+            return False
+        n = len([p for p in f.glob("*")
+                 if p.suffix.lower() in (".mp4", ".mov", ".mxf", ".mkv")])
+        folder.set(str(f))
+        prep_note.configure(text=f"Готово: {n} камер в папке проекта",
+                            text_color=T.SUCCESS if n else T.MUTED)
+        return n > 0
+
+    def do_sync():
+        w = app.need(wide, "общий план")
+        if not w:
+            return
+        argv = [str(ML / "sync.py"), "--ref", w, "--outdir", str(synced_dir())]
+        c = cam2.get().strip().strip('"')
+        if c and Path(c).is_file():
+            argv += ["--cam", c]
+        for mic in (mic1, mic2):
+            m = mic.get().strip().strip('"')
+            if m and Path(m).is_file():
+                argv += ["--mic-guest" if mic is mic1 else "--mic-host", m]
+        app.go([("Синхронизация", argv)], str(synced_dir()))
 
     def run():
         f = Path(folder.get().strip().strip('"'))
         if not f.is_dir():
-            messagebox.showwarning("AutoCut", "Папка не найдена: укажи synced")
+            app.warn("Папка synced не найдена. Нажми «Подставить» "
+                     "или «Синхронизировать».")
             return
         vids = sorted(p for p in f.glob("*")
                       if p.suffix.lower() in (".mp4", ".mov", ".mxf", ".mkv"))
         if not vids:
-            messagebox.showwarning(
-                "AutoCut", "В папке нет видео. Сначала прогони синхронизацию.")
+            app.warn("В папке нет видео. Сначала нажми «Синхронизировать».")
             return
         out = f.parent / "multicam"
         app.go([("Готовлю камеры к мультикаму",
@@ -487,8 +550,19 @@ def page_mc(parent, app):
                   "--timecode", tc.get().strip() or "01:00:00:00"])],
                str(out))
 
+    prow = ctk.CTkFrame(prep, fg_color="transparent")
+    prow.grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 8))
+    T.btn(prow, "Синхронизировать", "ghost", width=190,
+          command=do_sync).pack(side="left")
+    T.btn(prow, "Подставить", "primary", width=150,
+          command=autofill).pack(side="left", padx=10)
+    ctk.CTkLabel(prow, text="← берёт папку synced из папки проекта",
+                 text_color=T.FAINT, font=T.font(11)).pack(side="left",
+                                                           padx=10)
+
     T.btn(wrap, "Подготовить камеры", "primary", width=220,
           command=run).pack(anchor="w", padx=T.PAD, pady=(0, T.PAD))
+    autofill()
     return wrap
 
 
@@ -611,37 +685,100 @@ def page_digest(parent, app):
 
 
 def page_single(parent, app):
-    """Одна камера, без второй."""
+    """Одна камера, без второй.
+
+    Поле «Перебивки CSV» раньше было объявлено, но никуда не передавалось:
+    ты заполнял его впустую. Теперь оно подключено к interview.py --broll,
+    а рядом стоит кнопка, которая сама делает этот CSV через detect.py.
+    """
     wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
     src = T.card(wrap, "Исходники")
     v = T.field(src, 0, "Видео интервью", ctk.StringVar(),
                 browse=lambda: app.pick_file(v, "Видео интервью"))
-    bro = T.field(src, 1, "Перебивки CSV", ctk.StringVar(),
-                  browse=lambda: app.pick_file(bro, "Перебивки"))
-    out = T.field(src, 2, "Куда сложить", ctk.StringVar(),
+    out = T.field(src, 1, "Куда сложить", ctk.StringVar(),
                   browse=lambda: app.pick_dir(out, "Куда сложить"))
-    dev = T.device_row(src, 3)
+    dev = T.device_row(src, 2)
+
+    bro = T.card(wrap, "Перебивки", "Необязательно. Ими прикрывают стыки "
+                 "монтажа. Нажми «Найти перебивки» — CSV сделается сам")
+    bro_dir = ctk.StringVar()
+    T.field(bro, 0, "Папка с перебивками", bro_dir,
+            r"папка с короткими видео: зал, толпа, аппаратура",
+            browse=lambda: app.pick_dir(bro_dir, "Папка с перебивками"))
+    bro_csv = ctk.StringVar()
+    T.field(bro, 1, "CSV перебивок", bro_csv,
+            r"заполнится кнопкой ниже",
+            browse=lambda: app.pick_file(bro_csv, "CSV перебивок",
+                                         [("Таблица", "*.csv")]))
+    bro_note = ctk.CTkLabel(bro, text="", text_color=T.MUTED, anchor="w",
+                            font=T.font(11), wraplength=620, justify="left")
+    bro_note.grid(row=2, column=0, columnspan=3, sticky="w")
+
+    def project():
+        return out.get().strip().strip('"') or str(BASE / "interview_out")
+
+    def find_broll():
+        d = bro_dir.get().strip().strip('"')
+        if not d or not Path(d).is_dir():
+            app.warn("Укажи папку с перебивками.")
+            return
+        o = project()
+        Path(o).mkdir(parents=True, exist_ok=True)
+        csv_out = Path(o) / "broll.csv"
+        app.go([("Ищу перебивки",
+                 [str(ML / "detect.py"), "--input", d,
+                  "--output", str(csv_out),
+                  "--preview", f"{o}/preview",
+                  "--device", dev.get()])], o)
 
     def run():
         val = app.need(v, "видео интервью")
         if not val:
             return
-        o = out.get().strip().strip('"') or str(BASE / "interview_out")
+        o = project()
         Path(o).mkdir(parents=True, exist_ok=True)
-        app.go([
-            ("1. Рыба по тексту", [str(MODES / "interview.py"), "--input", val,
-                                   "--outdir", f"{o}/rz", "--device", dev.get()]),
+        argv = [str(MODES / "interview.py"), "--input", val,
+                "--outdir", f"{o}/rz", "--device", dev.get()]
+        b = bro_csv.get().strip().strip('"')
+        if b and Path(b).is_file():
+            argv += ["--broll", b]
+        elif b:
+            app.warn(f"CSV перебивок не найден, иду без прикрытия стыков: {b}")
+        steps = [
+            ("1. Рыба по тексту", argv),
             ("2. XML для Premiere",
              [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv",
               "--media-dir", o, "--out", f"{o}/ryba.xml",
               "--edl", f"{o}/ryba.edl", "--trim-rec"]),
             ("3. Субтитры",
              [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
-              "--out", f"{o}/ryba.srt"])], o)
+              "--out", f"{o}/ryba.srt"]),
+        ]
+        app.go(steps, o)
+
+    brow = ctk.CTkFrame(bro, fg_color="transparent")
+    brow.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    T.btn(brow, "Найти перебивки", "ghost", width=190,
+          command=find_broll).pack(side="left")
+
+    def autofill_broll():
+        """Подставить CSV, если detect.py его уже делал."""
+        p = Path(project()) / "broll.csv"
+        if p.is_file():
+            bro_csv.set(str(p))
+            bro_note.configure(text=f"Найдено перебивок: {p.name}",
+                                text_color=T.SUCCESS)
+        else:
+            bro_note.configure(text="CSV пока нет. Нажми «Найти перебивки».",
+                                text_color=T.MUTED)
+
+    T.btn(brow, "Подставить", "primary", width=140,
+          command=autofill_broll).pack(side="left", padx=10)
 
     T.btn(wrap, "Собрать рыбу", "primary", width=180, command=run).pack(
         anchor="w", padx=T.PAD, pady=(0, T.PAD))
     panel_result.add_to(wrap, app, out)
+    autofill_broll()
     return wrap
 
 
