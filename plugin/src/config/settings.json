@@ -1,17 +1,17 @@
 {
   "_readme": [
-    "AutoCut — единый файл порогов и правил. Значения здесь — выписка из текущих",
-    "констант кода на момент M0. В M1 модули начнут читать отсюда вместо хардкодов.",
-    "До M1 этот файл НИЧЕГО не читается: правка значений пока ни на что не влияет.",
-    "Правь только числа. Структуру не меняй — её читает код."
+    "AutoCut — единый файл порогов и правил. Здесь только то, что код",
+    "действительно читает: если значения нет здесь, модуль берёт зашитый",
+    "в себя запасной вариант и молчит об этом.",
+    "",
+    "Правь только числа. Структуру не меняй — её читает код.",
+    "Окно «Настройки» правит малую часть ключей; остальное — руками здесь."
   ],
 
   "project": {
-    "_note": "Режим таймкода проекта. drop_frame=false для 25 fps и для 29.97 NDF.",
+    "_note": "Режим таймкода проекта. drop_frame=false для 25 fps и для 29.97 NDF. Размер кадра берётся из export.* - здесь он не нужен.",
     "fps": 25,
     "drop_frame": false,
-    "width": 1920,
-    "height": 1080,
     "sequence_name": "AutoCut"
   },
 
@@ -20,7 +20,6 @@
     "model": "base",
     "device": "auto",
     "target_sec": 0,
-    "target_tolerance_sec": 1.0,
     "technical_phrases": [
       "проверка звука",
       "раз два три",
@@ -62,18 +61,12 @@
   },
 
   "interview_cuts": {
-    "_note": "Правила монтажа 2-камерного интервью (из ТЗ). Реализуются в M3.",
-    "silence_switch_ms": 300,
-    "topic_change_ms": 800,
+    "_note": "Правила монтажа 2-камерного интервью, реализованы в balance_cameras (src/modes/interview.py): камера следует за говорящим, shot_min запрещает дребезг, а на затянувшемся общем плане opt_max/opt_min/cam_a_share выпускают вторую камеру для разнообразия в пределах её доли эфира. shot_max - жёсткий потолок.",
     "shot_min_sec": 2.0,
     "shot_optimal_min_sec": 4.0,
     "shot_optimal_max_sec": 7.0,
     "shot_max_sec": 12.0,
-    "cam_a_share": 0.7,
-    "cam_b_share": 0.3,
-    "forbid_jump_cut": true,
-    "forbid_cut_inside_word": true,
-    "require_cutaway_on_jump": true
+    "cam_a_share": 0.7
   },
 
   "black": {
@@ -99,14 +92,6 @@
     "duration_over_tolerance_sec": 2.0,
     "max_same_plan_run": 3,
     "digest_finale_wide": true,
-    "digest_open_wide": true,
-    "target_sec": 60,
-    "structure": {
-      "hook_pct": 10,
-      "body_pct": 80,
-      "outro_pct": 100
-    },
-    "kuleshov_lite": true,
     "order_seed": 42,
     "two_opt_iterations": 2000
   },
@@ -135,9 +120,14 @@
   },
 
   "sync": {
-    "_note": "src/ml/sync.py — сведение камер и микрофонов по звуку.",
+    "_note": "src/ml/sync.py — сведение камер и микрофонов по звуку. global_* и mic_mismatch_* читаются только при согласовании больше двух дорожек; без них берутся зашитые значения.",
     "max_lag_sec": 60.0,
     "envelope_rate_hz": 50,
+    "global_max_lag_sec": 30.0,
+    "global_max_residual_sec": 0.04,
+    "global_min_contrast": 1.5,
+    "mic_mismatch_contrast": 2.0,
+    "mic_mismatch_quality": 0.25,
     "vote_block_sec": 60,
     "refine_window_sec": 3,
     "trust_quality": 0.3,
@@ -146,7 +136,7 @@
   },
 
   "music": {
-    "_note": "src/ml/music.py — подложка с дакингом по речи.",
+    "_note": "src/ml/music.py — подложка с дакингом по речи. sample_rate и channels обязаны совпадать с export.audio_*.",
     "bed_db": -20.0,
     "duck_db": -32.0,
     "fade_sec": 2.0,
@@ -158,8 +148,7 @@
     "_note": "src/modes/review.py — разбор готового ролика.",
     "scene_threshold": 0.35,
     "min_shot_sec": 0.6,
-    "detect_conf": 0.35,
-    "low_confidence": 0.65
+    "detect_conf": 0.35
   },
 
   "news": {
@@ -214,7 +203,7 @@
   },
 
   "export": {
-    "_note": "src/io — экспорт в Premiere.",
+    "_note": "src/io — экспорт в Premiere. trim_to_plan и write_edl читает окно при сборке: выключи, если EDL не нужен или куски резать по плану не нужно.",
     "fps": 25,
     "width": 1920,
     "height": 1080,
@@ -222,6 +211,8 @@
     "audio_sample_rate": 48000,
     "audio_channels": 2,
     "color_depth": 24,
+    "markers": true,
+    "srt_max_chars": 84,
     "trim_to_plan": true,
     "write_edl": true
   }

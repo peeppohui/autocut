@@ -514,12 +514,80 @@ def black_scan(wide: Path, gcam: Path, cache_dir: Path) -> Dict[str, list]:
     return iv
 
 
+def balance_cameras(rows, share_a: float = 0.7, shot_min: float = 2.0,
+                    opt_min: float = 4.0, opt_max: float = 7.0,
+                    shot_max: float = 12.0):
+    """Раскладывает камеры по двум правилам: доля и длина кадра.
+
+    rows: [(i, o, sp, text, want)] - want уже выведена из говорящего и
+    из проверки на чёрный кадр. Возвращает тот же список с перебранной
+    камерой.
+
+    ДОЛЯ. Если бы камера шла строго за говорящим, то весь монолог гостя
+    прошёл бы на его камере - и смотреть это вредно. Поэтому вторая
+    камера не может занять больше своей части эфира, а всё остальное
+    достаётся основной.
+
+    ДЛИНА КАДРА. Переключаться часто - рябит, держать одного говорящего
+    крупняком долго - скучно. Поэтому четыре порога, и они не дублируют
+    друг друга:
+      shot_min - жёсткий пол: раньше не переключаемся никогда;
+      opt_min  - обратный пол для возврата: сняли кадр с одной камеры,
+                 на другую раньше opt_min не идём, иначе дрожь;
+      opt_max  - после него монолог становится однообразным, и мы
+                 переключаемся ради разнообразия, даже если спикер тот;
+      shot_max - жёсткий потолок: дольше держать нельзя.
+    """
+    if not rows:
+        return rows
+    total = sum(max(0.0, o - i) for i, o, _s, _t, _w in rows) or 1.0
+    budget_b = max(0.0, (1.0 - share_a) * total)
+
+    out, time_a, time_b = [], 0.0, 0.0
+    cur, held = None, 0.0
+    for r in rows:
+        i, o, sp, text, want = r
+        dur = max(0.0, o - i)
+
+        if cur is None:
+            pass                              # первый кусок: как выбрали
+        elif held < shot_min:
+            want = cur                         # жёсткий пол: рано дёргаться
+        elif want != cur:
+            want = want                        # спикер сменился - режем
+        elif cur == "wide" and held > shot_max:
+            want = "gcam"                      # потолок: даже через долю
+        elif cur == "wide" and held > opt_max and held >= opt_min \
+                and time_b + dur <= budget_b:
+            # разнообразие: основная камера задержалась, пускаем вторую.
+            # Но только если у второй ещё осталась часть эфира и второй
+            # кадр не окажется короче opt_min - иначе будет дрожь.
+            want = "gcam"
+        else:
+            want = cur
+
+        if want != cur:
+            cur, held = want, 0.0
+
+        out.append((i, o, sp, text, want))
+        if want == "wide":
+            time_a += dur
+        else:
+            time_b += dur
+        held += dur
+
+    return out
+
+
 def plan_cameras(chunks, wide: Path, gcam: Path, cache_dir: Path):
     """К каждому куску решаем, какая камера основная.
 
     Камеру выбирает говорящий, но если она молчит картинкой, а вторая
     снимает - берём вторую: выбрасывать кусок из-за одной мёртвой камеры
     обидно. Выбрасываем только когда не снимает никто.
+
+    Дальше желаемую камеру прогоняем через balance_cameras: там доля
+    основной камеры и длина кадра из settings.json.
     """
     enabled = bool(settings.get("black.enabled", True))
     ratio = float(settings.get("black.drop_ratio", 0.8))
@@ -538,6 +606,14 @@ def plan_cameras(chunks, wide: Path, gcam: Path, cache_dir: Path):
                     continue
                 want, swapped = other, swapped + 1
         planned.append((i, o, sp, text, want))
+    planned = balance_cameras(
+        planned,
+        share_a=float(settings.get("interview_cuts.cam_a_share", 0.7)),
+        shot_min=float(settings.get("interview_cuts.shot_min_sec", 2.0)),
+        opt_min=float(settings.get("interview_cuts.shot_optimal_min_sec", 4.0)),
+        opt_max=float(settings.get("interview_cuts.shot_optimal_max_sec", 7.0)),
+        shot_max=float(settings.get("interview_cuts.shot_max_sec", 12.0)),
+    )
     if dropped or swapped:
         print(f"Камера: выброшено {dropped} кусков без картинки, "
               f"у {swapped} взят запасной ракурс.")
@@ -952,9 +1028,12 @@ def main(argv=None) -> int:
                     help="только транскрипт с номерами (правка текста до сборки)")
     ap.add_argument("--from-transcript", default="",
                     help="собрать selects из правленого transcript.txt (мультикамера)")
-    ap.add_argument("--target", default="",
+    _tgt = float(settings.get("interview.target_sec", 0) or 0)
+    ap.add_argument("--target",
+                    default=str(int(_tgt)) if _tgt > 0 else "",
                     help="хронометраж готового: «10:00» или «600». "
-                         "Пусто - без ограничения")
+                    "Пусто - без ограничения. Без флага берётся "
+                    "interview.target_sec из settings.json")
     args = ap.parse_args(argv)
 
     if args.wide or args.guest_mic or args.host_mic:

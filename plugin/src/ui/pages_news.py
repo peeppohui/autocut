@@ -31,6 +31,7 @@ sys.path.insert(0, str(SRC / "config"))
 
 import theme as T                            # noqa: E402
 import panel_result                          # noqa: E402
+import steps as STEPS                        # noqa: E402
 
 VIDEO_EXT = (".mp4", ".mov", ".mxf", ".mkv", ".avi", ".m4v")
 TITLE_SEPS = (" — ", " - ", " – ", "—")
@@ -408,12 +409,8 @@ def page_news(parent, app):
              [str(MODES / "news_package.py"), "--spec", str(spec_path),
               "--outdir", rz]),
             ("2. XML для Premiere",
-             [str(IO / "premiere.py"), "--timeline", f"{rz}/selects.csv",
-              "--media-dir", o, "--out", f"{o}/ryba.xml",
-              "--edl", f"{o}/ryba.edl", "--trim-rec"]),
-            ("3. Субтитры",
-             [str(IO / "srt.py"), "--selects", f"{rz}/selects.csv",
-              "--out", f"{o}/ryba.srt"]),
+             STEPS.premiere_args(f"{rz}/selects.csv", o)),
+            ("3. Субтитры", STEPS.srt_args(f"{rz}/selects.csv", o)),
         ], o)
 
     # ------------------------------------------------------- кнопки

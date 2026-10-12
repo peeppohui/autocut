@@ -67,7 +67,14 @@ def build_filter(speech: list, total: float, bed_db: float, duck_db: float,
                      f"volume={vol:.4f}[p{k}]")
         maps.append(f"[p{k}]")
     n = len(maps)
-    tail = f"{''.join(maps)}concat=n={n}:v=0:a=1,aresample=48000,aformat=channel_layouts=stereo"
+    # частота и число каналов раньше стояли здесь зашитыми; если в
+    # секвенции другое разрешение или моно, подложка обязана совпасть,
+    # иначе ffmpeg сам догадается и поднимет ошибку в конце монтажа
+    rate = int(settings.get("music.sample_rate", 48000))
+    ch = int(settings.get("music.channels", 2))
+    layout = "stereo" if ch >= 2 else "mono"
+    tail = (f"{''.join(maps)}concat=n={n}:v=0:a=1,aresample={rate},"
+            f"aformat=channel_layouts={layout}")
     if fade > 0:
         f = min(fade, total / 4)
         tail += f",afade=t=in:st=0:d={f:.2f},afade=t=out:st={total - f:.2f}:d={f:.2f}"
@@ -112,8 +119,13 @@ def main(argv=None) -> int:
         print("Без --duck: ровная подложка.")
 
     filt = build_filter(speech, total, args.bed_db, args.duck_db, args.fade)
+    # те же параметры, что и в build_filter: фильтр уже привёл подложку к
+    # sample_rate и раскладке из settings, кодировщик обязан согласиться
+    rate = int(settings.get("music.sample_rate", 48000))
+    ch = int(settings.get("music.channels", 2))
     cmd = ["ffmpeg", "-y", "-v", "error", "-stream_loop", str(loops), "-i", str(music),
-           "-filter_complex", filt, "-t", f"{total:.2f}", "-ar", "48000", "-ac", "2",
+           "-filter_complex", filt, "-t", f"{total:.2f}", "-ar", str(rate),
+           "-ac", str(ch),
            "-c:a", "pcm_s16le", str(args.out)]
     subprocess.run(cmd, check=True)
     got = probe_dur(Path(args.out))

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 AutoCut — окно сбора рыбы. Терминал больше не нужен.
@@ -47,6 +47,7 @@ import settings                              # noqa: E402
 import pages_news                            # noqa: E402
 import panel_result                          # noqa: E402
 import card_multicam                         # noqa: E402
+import steps as _steps                       # noqa: E402
 
 
 # ==================================================================
@@ -318,6 +319,13 @@ class App(ctk.CTk):
 # ==================================================================
 #  страницы
 # ==================================================================
+# Аргументы шагов собирает ui/steps.py: иначе страницам пришлось бы
+# импортировать app, а app импортирует страницы.
+premiere_args = _steps.premiere_args
+srt_args = _steps.srt_args
+sync_args = _steps.sync_args
+
+
 def page_multi(parent, app):
     """Интервью 2 камеры — основной рабочий режим."""
     wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
@@ -372,13 +380,8 @@ def page_multi(parent, app):
              [str(MODES / "interview.py"), "--wide", w, "--guest-cam", g,
               "--outdir", f"{o}/rz", "--from-transcript", t] + tgt_args()),
             ("2. XML для Premiere",
-             [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv",
-              "--media-dir", o, "--out", f"{o}/ryba.xml",
-              "--edl", f"{o}/ryba.edl", "--trim-rec"]
-             + (["--stacked"] if two_cam.get() else [])),
-            ("3. Субтитры",
-             [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
-              "--out", f"{o}/ryba.srt"])], o)
+             premiere_args(f"{o}/rz/selects.csv", o, two_cam.get())),
+            ("3. Субтитры", srt_args(f"{o}/rz/selects.csv", o))], o)
 
     def run():
         paths = {}
@@ -410,13 +413,9 @@ def page_multi(parent, app):
         if not only_tx.get():
             steps.append(
                 ("3. XML для Premiere",
-                 [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv",
-                  "--media-dir", o, "--out", f"{o}/ryba.xml",
-                  "--edl", f"{o}/ryba.edl", "--trim-rec"]
-                 + (["--stacked"] if two_cam.get() else [])))
+                 premiere_args(f"{o}/rz/selects.csv", o, two_cam.get())))
             steps.append(("4. Субтитры",
-                          [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
-                           "--out", f"{o}/ryba.srt"]))
+                          srt_args(f"{o}/rz/selects.csv", o)))
         else:
             app.log("Режим транскрипта: после шага 2 вычеркни мусор в "
                     "rz/transcript.txt строками с '-' и вернись сюда.")
@@ -461,16 +460,27 @@ def page_settings(parent, app):
                               settings.get("black.enabled", True))),
                           "камера не включена — выкидываем молчание вместо речи")
 
-    shot = T.card(wrap, "Камера")
-    shot_min = T.slider(shot, 0, "Короткий кадр, с",
+    shot = T.card(wrap, "Камера",
+                  "Как часто переключаться между камерами")
+    shot_min = T.slider(shot, 0, "Короче кадр не режем, с",
                         ctk.DoubleVar(value=float(
                             settings.get("interview_cuts.shot_min_sec", 2.0))),
-                        1.0, 6.0, " с")
-    shot_max = T.slider(shot, 1, "Длинный кадр, с",
+                        0.0, 6.0, " с")
+    opt_min = T.slider(shot, 1, "Второй кадр не короче, с",
+                       ctk.DoubleVar(value=float(
+                           settings.get("interview_cuts.shot_optimal_min_sec",
+                                        4.0))),
+                       0.0, 8.0, " с")
+    opt_max = T.slider(shot, 2, "Основная камера задержалась, с",
+                       ctk.DoubleVar(value=float(
+                           settings.get("interview_cuts.shot_optimal_max_sec",
+                                        7.0))),
+                       0.0, 20.0, " с")
+    shot_max = T.slider(shot, 3, "Кадр дольше не держим, с",
                         ctk.DoubleVar(value=float(
                             settings.get("interview_cuts.shot_max_sec", 12.0))),
-                        5.0, 30.0, " с")
-    share_a = T.slider(shot, 2, "Доля основной камеры",
+                        2.0, 30.0, " с")
+    share_a = T.slider(shot, 4, "Доля основной камеры",
                        ctk.DoubleVar(value=float(
                            settings.get("interview_cuts.cam_a_share", 0.7))),
                        0.1, 1.0)
@@ -486,6 +496,8 @@ def page_settings(parent, app):
                          ("interview.min_word_prob", min_prob),
                          ("black.enabled", drop_black),
                          ("interview_cuts.shot_min_sec", shot_min),
+                         ("interview_cuts.shot_optimal_min_sec", opt_min),
+                         ("interview_cuts.shot_optimal_max_sec", opt_max),
                          ("interview_cuts.shot_max_sec", shot_max),
                          ("interview_cuts.cam_a_share", share_a)):
             v = var.get()
@@ -529,20 +541,16 @@ def page_digest(parent, app):
                                             "--finale-wide", "--target-sec", t,
                                             "--out", f"{o}/timeline.csv"]),
         ]
-        tail = ["--out", f"{o}/ryba.xml", "--edl", f"{o}/ryba.edl",
-                "--trim-rec"]
         if mus.get().strip():
             steps.append(("3. Подложка", [str(ML / "music.py"), "--music",
                                           mus.get().strip(), "--duration", t,
                                           "--out", f"{o}/bed.wav"]))
             steps.append(("4. XML для Premiere",
-                          [str(IO / "premiere.py"), "--timeline",
-                           f"{o}/timeline.csv", "--media-dir", s]
-                          + tail + ["--music", f"{o}/bed.wav"]))
+                          premiere_args(f"{o}/timeline.csv", s)
+                          + ["--music", f"{o}/bed.wav"]))
         else:
             steps.append(("3. XML для Premiere",
-                          [str(IO / "premiere.py"), "--timeline",
-                           f"{o}/timeline.csv", "--media-dir", s] + tail))
+                          premiere_args(f"{o}/timeline.csv", s)))
         app.log("Проверь preview после шага 1: где уверенность <= 0.65 — "
                 "поправь CSV и жми снова.")
         app.go(steps, o)
@@ -616,12 +624,8 @@ def page_single(parent, app):
         steps = [
             ("1. Рыба по тексту", argv),
             ("2. XML для Premiere",
-             [str(IO / "premiere.py"), "--timeline", f"{o}/rz/selects.csv",
-              "--media-dir", o, "--out", f"{o}/ryba.xml",
-              "--edl", f"{o}/ryba.edl", "--trim-rec"]),
-            ("3. Субтитры",
-             [str(IO / "srt.py"), "--selects", f"{o}/rz/selects.csv",
-              "--out", f"{o}/ryba.srt"]),
+             premiere_args(f"{o}/rz/selects.csv", o)),
+            ("3. Субтитры", srt_args(f"{o}/rz/selects.csv", o)),
         ]
         app.go(steps, o)
 
@@ -719,7 +723,7 @@ GROUPS = [
                         ("Проверка готового", page_review)]),
 ]
 
-FIELDS = 8
+FIELDS = 10
 
 if __name__ == "__main__":
     App().mainloop()

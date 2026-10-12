@@ -86,37 +86,33 @@ Premiere **молча**, с пустым сообщением в окне «File
 
 ### Мёртвые настройки: что читается, а что нет
 
-Значение в `settings.json` может быть двух видов: **рабочее** и
-**нарисованное**. Проверяется просто:
+Значение в `settings.json` должно читаться кодом. Если не читается —
+файл обещает то, чего не происходит: человек правит число, монтаж
+меняется как-то ещё, и через час он уже не понимает, что трогал.
+
+Проверяется автоматически:
 
 ```bash
-python -c "import sys;sys.path[:0]=['plugin/src','plugin/src/config'];import settings;print(settings.get('export.fps'))"
+python plugin/tests/test_settings_live.py
 ```
 
-Или поиском по коду: `settings.get("...")` для точечного ключа и
-`settings.section("news")` для целой секции. Именно из-за второго способа
-секция `news.*` выглядит мёртвой, а на самом деле читается вся целиком
-(`news_package.py:567`).
+Тест требует, чтобы не было нечитаемых ключей, чтобы все ключи,
+которые читает код, присутствовали в файле, и — главное — чтобы
+каждый ползунок окна «Настройки» читался **движком**, а не самим
+окном. Именно последняя проверка ловила три ползунка, которые годами
+меняли то, на что никто не смотрел.
 
-На момент публикации:
+Секция `news.*` читается целиком через `settings.section("news")`
+(`news_package.py:567`) — точечного `settings.get` там нет, и по
+поиску `settings.get` она выглядит мёртвой. `digest.rec_duration_sec`
+тоже читается как словарь целиком, поэтому его дети живут вместе с
+родителем, а не по отдельности.
 
-- **в `_readme` файла написано «До M1 этот файл НИЧЕГО не читается» —
-  это неправда**, читается 73 ключа. Правь при случае.
-- **~28 ключей не читаются вообще:** `project.width`/`project.height`
-  (код берёт `export.*`), `interview.target_sec` (приходит флагом `--target`),
-  `interview_cuts.cam_b_share`, `forbid_jump_cut`, `forbid_cut_inside_word`,
-  `require_cutaway_on_jump`, `silence_switch_ms`, `topic_change_ms`,
-  `shot_optimal_min_sec`/`shot_optimal_max_sec`, `digest.structure.*`,
-  `digest.kuleshov_lite`, `digest.digest_open_wide`, `digest.target_sec`,
-  `sync.envelope_rate_hz`, `music.sample_rate`, `music.channels`,
-  `review.low_confidence`, `export.trim_to_plan`, `export.write_edl`, а также
-  вложенные `digest.rec_duration_sec.деталь/крупный/…` — код читает только
-  общий `digest.rec_duration_sec`.
-- **5 ключей читаются, но в файле отсутствуют**, поэтому молча берётся
-  значение по умолчанию: `sync.global_max_lag_sec`,
-  `sync.global_max_residual_sec`, `sync.global_min_contrast`,
-  `sync.mic_mismatch_contrast`, `sync.mic_mismatch_quality`.
-- Окно «Настройки» правит **8** значений из ~140.
+Осознанно **не** подключено: `digest.target_sec`. У дайджеста дефолт
+`--target-sec` намеренно 0, а не из конфига — иначе запуск без флага
+молча выкинул бы куски (`autocut.py`). У интервью наоборот:
+`interview.target_sec` читается, потому что точный хронометраж там
+нужен по задаче.
 
 ### Сверка с DTD
 

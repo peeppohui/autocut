@@ -85,15 +85,18 @@ def read_wav(path: Path):
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
-def envelope(x, sr: int = 16000, win: float = 0.02, rate: float = 50.0,
+def envelope(x, sr: int = 16000, win: float = 0.02, rate: float = None,
              hp: float = 0.2):
     """Огибающая громкости: убираем медленный дрейф/субсонику окном hp
     (голос от 100 Гц не трогаем), сглаживаем окном win, децимация до rate Гц.
 
     rate и hp — необязательные: старый поиск от опоры работает на значениях
     по умолчанию, глобальному согласованию нужна другая детализация.
+    Без rate берём sync.envelope_rate_hz - раньше здесь стояло зашитое 50.
     """
     import numpy as np
+    if rate is None:
+        rate = float(settings.get("sync.envelope_rate_hz", 50.0))
     wbase = max(1, int(sr * hp))
     x = x - np.convolve(x, np.ones(wbase) / wbase, mode="same")
     w = max(1, int(sr * win))
