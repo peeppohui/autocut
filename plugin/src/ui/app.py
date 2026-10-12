@@ -476,6 +476,67 @@ def page_preview(parent, app):
     return wrap
 
 
+def page_mc(parent, app):
+    """Подготовка камер к настоящему мультикаму Premiere.
+
+    Premiere умеет строить мультикам сам, если у файлов совпадает
+    таймкод. Всё, что делаем мы, - впечатываем метку: видео при
+    этом не перекодируется, файлы просто копируются с таймкодом.
+    """
+    wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+
+    src = T.card(wrap, "Камеры", "Берём готовые синхроны из папки synced")
+    folder = T.field(src, 0, "Папка synced", ctk.StringVar(),
+                     "папка проекта\\synced",
+                     browse=lambda: app.pick_dir(folder, "Папка synced"))
+    tc = T.field(src, 1, "Начало таймкода", ctk.StringVar(value="01:00:00:00"),
+                 "одинаковый для всех камер")
+
+    how = T.card(wrap, "Что произойдёт",
+                 "Мультикам строится самим Premiere, вручную")
+    # многострочные подписи - через pack: в grid строки с текстом
+    # разной высоты наезжают друг на друга
+    for text in (
+        "1. Каждой камере делается копия с одинаковым таймкодом.\n"
+        "   Копия нужна, чтобы не трогать оригиналы; видео при этом\n"
+        "   НЕ перекодируется - только метка, это быстро.",
+        "2. Папку с копиями импортируешь в Premiere, выделяешь все\n"
+        "   файлы и жмёшь: ПКМ > Multi-Camera > Create Multicam Sequence.",
+        "3. В окне выбираешь Synchronize Point: Timecode. Всё, ракурсы\n"
+        "   встанут друг на друга сами.",
+    ):
+        ctk.CTkLabel(how, text=text, text_color=T.MUTED, anchor="w",
+                     justify="left", font=T.font(12)).pack(
+                         anchor="w", pady=4)
+
+    note = ctk.CTkLabel(wrap, text="", text_color=T.SUCCESS, anchor="w",
+                        font=T.font(12))
+    note.pack(anchor="w", padx=T.PAD, pady=(0, 10))
+
+    def run():
+        f = Path(folder.get().strip().strip('"'))
+        if not f.is_dir():
+            messagebox.showwarning("AutoCut", "Папка не найдена: укажи synced")
+            return
+        vids = sorted(p for p in f.glob("*")
+                      if p.suffix.lower() in (".mp4", ".mov", ".mxf", ".mkv"))
+        if not vids:
+            messagebox.showwarning(
+                "AutoCut", "В папке нет видео. Сначала прогони синхронизацию.")
+            return
+        out = f.parent / "multicam"
+        app.go([("Готовлю камеры к мультикаму",
+                 [str(ML / "multicam.py"),
+                  "--input", *[str(v) for v in vids],
+                  "--outdir", str(out),
+                  "--timecode", tc.get().strip() or "01:00:00:00"])],
+               str(out))
+
+    T.btn(wrap, "Подготовить камеры", "primary", width=220,
+          command=run).pack(anchor="w", padx=T.PAD, pady=(0, T.PAD))
+    return wrap
+
+
 def page_settings(parent, app):
     """Пороги из settings.json — правятся прямо здесь."""
     wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
@@ -663,6 +724,7 @@ def page_log(parent, app):
 
 SUBS = {
     "Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
+    "Мультикам": "Настоящий мультикам в Premiere по общему таймкоду",
     "Просмотр": "Оценка монтажа без захода в Premiere",
     "Настройки": "Пороги чистки речи и раскладки кадров",
     "Ход работы": "Что делает программа прямо сейчас",
@@ -673,6 +735,7 @@ SUBS = {
 
 TPL = [
     ("Интервью 2 камеры", page_multi),
+    ("Мультикам", page_mc),
     ("Просмотр", page_preview),
     ("Настройки", page_settings),
     ("Ход работы", page_log),
@@ -684,6 +747,7 @@ TPL = [
 # Слева: сначала то, чем пользуешься каждый день, потом остальное.
 GROUPS = [
     ("Основное", [("Интервью 2 камеры", page_multi),
+                  ("Мультикам", page_mc),
                   ("Просмотр", page_preview),
                   ("Настройки", page_settings),
                   ("Ход работы", page_log)]),
