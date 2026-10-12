@@ -61,6 +61,59 @@ Premiere **молча**, с пустым сообщением в окне «File
 - Пустая дорожка (0 `clipitem`) в `<media>` — не причина отказа, проверено,
   но `totalExplodedTrackCount` на ней лучше не оставлять.
 
+### Видеоклип без колонки `audio` занимает свою звуковую дорожку
+
+`premiere.py:334` — если у клипа колонка `audio` пуста, он получает дорожку
+`L:<дорожка видео>` и линкуется на **собственный** файл. Для интервью это
+не проявляется: там у каждого клипа микрофон прописан явно. Для новостного
+сюжета проявляется — у перебивки микрофона нет, и она создаёт отдельную
+звуковую дорожку.
+
+Последствие: заявленные номера дорожек сдвигаются. В `settings.json`
+`news.tracks.vo_audio = "A2"` рассчитан на одну связанную дорожку, но при
+одном синхроне и одной перебивке получается `A1` (микрофон синхрона),
+`A2` (собственный звук перебивки), `A3` (закадр) — закадр встаёт на `A3`.
+
+Сам файл при этом не сломан: `check_xml` проходит, Premiere импортирует.
+Вопрос творческий: в новостном сюжете звук перебивки обычно не нужен и его
+гасят вручную. Чинить можно двумя способами — гасить перебивку флагом в
+раскладке либо вообще не линковать видеоклип, если колонка `audio` пуста.
+Второе ломает однокамерное интервью, где микрофон зашит в сам файл.
+
+### Мёртвые настройки: что читается, а что нет
+
+Значение в `settings.json` может быть двух видов: **рабочее** и
+**нарисованное**. Проверяется просто:
+
+```bash
+python -c "import sys;sys.path[:0]=['plugin/src','plugin/src/config'];import settings;print(settings.get('export.fps'))"
+```
+
+Или поиском по коду: `settings.get("...")` для точечного ключа и
+`settings.section("news")` для целой секции. Именно из-за второго способа
+секция `news.*` выглядит мёртвой, а на самом деле читается вся целиком
+(`news_package.py:567`).
+
+На момент публикации:
+
+- **в `_readme` файла написано «До M1 этот файл НИЧЕГО не читается» —
+  это неправда**, читается 73 ключа. Правь при случае.
+- **~28 ключей не читаются вообще:** `project.width`/`project.height`
+  (код берёт `export.*`), `interview.target_sec` (приходит флагом `--target`),
+  `interview_cuts.cam_b_share`, `forbid_jump_cut`, `forbid_cut_inside_word`,
+  `require_cutaway_on_jump`, `silence_switch_ms`, `topic_change_ms`,
+  `shot_optimal_min_sec`/`shot_optimal_max_sec`, `digest.structure.*`,
+  `digest.kuleshov_lite`, `digest.digest_open_wide`, `digest.target_sec`,
+  `sync.envelope_rate_hz`, `music.sample_rate`, `music.channels`,
+  `review.low_confidence`, `export.trim_to_plan`, `export.write_edl`, а также
+  вложенные `digest.rec_duration_sec.деталь/крупный/…` — код читает только
+  общий `digest.rec_duration_sec`.
+- **5 ключей читаются, но в файле отсутствуют**, поэтому молча берётся
+  значение по умолчанию: `sync.global_max_lag_sec`,
+  `sync.global_max_residual_sec`, `sync.global_min_contrast`,
+  `sync.mic_mismatch_contrast`, `sync.mic_mismatch_quality`.
+- Окно «Настройки» правит **8** значений из ~140.
+
 ### Сверка с DTD
 
 `FCPXMLv5.dtd` с сайта Apple полезна, но с оговорками:

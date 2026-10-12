@@ -47,7 +47,12 @@ def mono(size=12):
 
 # ---------------------------------------------------------------- кнопки
 def btn(parent, text, kind="ghost", **kw):
-    """Кнопки одного семейства: главная, второстепенная, тихая."""
+    """Кнопки одного семейства: главная, второстепенная, тихая.
+
+    Явные аргументы выигрывают у вида: без этого нельзя поставить
+    кнопку в строку компактного поля (height=32), и вызов падает с
+    «got multiple values for keyword argument».
+    """
     looks = {
         "primary": dict(fg_color=ACCENT, hover_color="#7aa2ff",
                         text_color="#0b1020", height=42, corner_radius=R),
@@ -58,7 +63,9 @@ def btn(parent, text, kind="ghost", **kw):
         "danger": dict(fg_color="transparent", hover_color="#3a1f22",
                        text_color=DANGER, height=36, corner_radius=8),
     }
-    return ctk.CTkButton(parent, text=text, **looks[kind], **kw)
+    opts = dict(looks[kind])
+    opts.update(kw)
+    return ctk.CTkButton(parent, text=text, **opts)
 
 
 # ---------------------------------------------------------------- блоки
@@ -132,6 +139,39 @@ def slider(body, row, label, var, lo, hi, suffix=""):
                                         padx=14, pady=6)
     val.grid(row=row, column=2, sticky="e")
     return var
+
+
+def mini_field(parent, var, placeholder="", browse=None):
+    """Компактное поле без подписи — для строк-списков.
+
+    field() рассчитан на «одна подпись — одно поле» и занимает всю
+    ширину карточки. В повторяющихся строках (спикеры сюжета) таких
+    полей пять в ряд, и подписи там съедали бы место.
+
+    В отличие от field() возвращает не переменную, а фрейм: поле и
+    кнопка «…» лежат в нём, и его надо разместить через grid/pack.
+    """
+    row = ctk.CTkFrame(parent, fg_color="transparent")
+    ctk.CTkEntry(row, textvariable=var, height=32, corner_radius=8,
+                 fg_color=SURFACE, border_color=BORDER, border_width=1,
+                 text_color=TEXT, font=font(12),
+                 placeholder_text=placeholder).pack(side="left", fill="x",
+                                                   expand=True,
+                                                   padx=(0, 6) if browse else 0)
+    if browse is not None:
+        btn(row, "…", "ghost", width=32, height=32, command=browse).pack(
+            side="left")
+    return row
+
+
+def column_head(parent, row, texts, weights):
+    """Заголовки колонок над списком. Без них «файл / транскрипт» неразличимы."""
+    for i, (txt, w) in enumerate(zip(texts, weights)):
+        ctk.CTkLabel(parent, text=txt, text_color=FAINT, anchor="w",
+                     width=60, font=font(10, "bold")).grid(
+                         row=row, column=i, sticky="w", padx=(0, 8),
+                         pady=(0, 2))
+        parent.grid_columnconfigure(i, weight=w, uniform="news")
 
 
 def device_row(body, row, label="Устройство:"):
