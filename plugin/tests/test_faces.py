@@ -147,6 +147,76 @@ mixed = [mk(0.5, 0.3), []]
 ok("часть замеров без лица - не помеха",
    F.main_face_of_segment(mixed) is not None, "")
 
+# --- камера ведёт лицо: траектория и ограничения оператора ---
+FPS = 25.0
+TR = F.track_segment
+
+
+def fake_track(points):
+    """[(t, Face)] из точек (t, x)."""
+    return [(t, F.Face(x, 0.4, 0.2)) for t, x in points]
+
+
+# траектория на каждый кадр
+path1 = F.operator_path(fake_track([(0.0, 0.30), (1.0, 0.70)]), 0.0, 1.0, FPS)
+ok("траектория по кадру, а не по замерам", len(path1) == 25, str(len(path1)))
+ok("камера следует за лицом", path1[0].cx < path1[-1].cx,
+   f"{path1[0].cx:.3f} -> {path1[-1].cx:.3f}")
+ok("движение плавное, без прыжков",
+   max(abs(path1[i + 1].cx - path1[i].cx) for i in range(24)) < 0.05,
+   str(max(abs(path1[i + 1].cx - path1[i].cx) for i in range(24))))
+
+# предел скорости: прыжок с края на край обязан занять время
+step = F.MAX_PAN / FPS
+jumped = F.operator_path(fake_track([(0.0, 0.05), (0.10, 0.95),
+                                     (1.0, 0.95)]), 0.0, 1.0, FPS)
+biggest = max(abs(jumped[i + 1].cx - jumped[i].cx)
+              for i in range(len(jumped) - 1))
+ok("телепорт ограничен по скорости", biggest <= step + 1e-6,
+   f"{biggest:.5f} при пределе {step:.5f}")
+ok("и за это время камера не доскакала",
+   jumped[-1].cx < 0.95, f"{jumped[-1].cx:.3f}")
+
+# мёртвая зона: микро-дрожь не проходит в кадр
+buzz = F.operator_path(fake_track([(0.0, 0.500), (1.0, 0.501)]), 0.0, 1.0,
+                       FPS, deadband=F.DEADBAND)
+ok("мёртвая зона гасит микродрожь",
+   max(buzz[i + 1].cx - buzz[i].cx for i in range(24)) == 0.0,
+   str(max(buzz[i + 1].cx - buzz[i].cx for i in range(24))))
+
+# медиана гасит один выброс детектора
+spike = F.operator_path(fake_track([(0.0, 0.50), (0.4, 0.50), (0.42, 0.95),
+                                    (0.44, 0.50), (1.0, 0.50)]), 0.0, 1.0, FPS)
+mid = [f.cx for f in spike[10:15]]
+ok("одиночный выброс детектора не уводит кадр",
+   max(mid) < 0.60, str(max(mid)))
+
+# без замеров - статика, а не мусор
+ok("без трека камера стоит", F.operator_path([], 0.0, 1.0, FPS) == [None] * 25,
+   "")
+ok("короткий отрезок не ломается",
+   len(F.operator_path(fake_track([(0.0, 0.5)]), 0.0, 0.04, FPS)) == 1, "")
+
+# окна на каждый кадр и пропорции
+wins = F.crop_windows(path1, W, H)
+ok("окно на каждый кадр", len(wins) == 25, str(len(wins)))
+ok("все окна 9:16", all(abs(bw / bh - 9 / 16) < 0.02 for _x, _y, bw, bh in wins),
+   str([(bw, bh) for _x, _y, bw, bh in wins][:3]))
+ok("окно едет за лицом", wins[-1][0] > wins[0][0],
+   f"{wins[0][0]} -> {wins[-1][0]}")
+ok("окно не вылезает за кадр",
+   all(0 <= x and x + bw <= W for x, _y, bw, _h in wins), "")
+ok("окно не схлопнулось",
+   all(bw >= 608 * 0.70 * 0.99 for _x, _y, bw, _h in wins), "")
+
+# пайп всегда одного размера - иначе ffmpeg не прочитает поток
+sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src" / "ml"))
+import vertical  # noqa: E402
+ok("размер пайпа постоянен", vertical.pipe_size(1080, 1080 / 1920) == (608, 1080),
+   str(vertical.pipe_size(1080, 1080 / 1920)))
+ok("и для другого кадра тоже", vertical.pipe_size(720, 1080 / 1920) == (406, 720),
+   str(vertical.pipe_size(720, 1080 / 1920)))
+
 print()
 if fail:
     print(f"FACES FAIL ({len(fail)}): {fail}")

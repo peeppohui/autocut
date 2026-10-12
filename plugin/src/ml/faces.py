@@ -58,6 +58,18 @@ MIN_CROP_FRAC = float(settings.get("faces.min_crop_frac", 0.70))
 SAMPLES_PER_CLIP = int(settings.get("faces.samples_per_clip", 3))
 FOLLOW_FACES = bool(settings.get("faces.follow_faces", True))
 SWAP_WHEN_BLANK = bool(settings.get("faces.swap_camera_when_blank", True))
+# --- ведение камеры ---
+# сколько раз в секунду опрашиваем детектор: между замерами окно идёт
+# по интерполяции, поэтому чаще брать незачем
+TRACK_HZ = float(settings.get("faces.track_hz", 12))
+# на сколько кадр может «дрогнуть» незаметно для глаза. Меньше - камера
+# стоит как вкопанная и не идёт за лицом, больше - картинка подрагивает
+DEADBAND = float(settings.get("faces.deadband", 0.004))
+# максимум кадров в секунду, за которые окно уезжает на всю ширину.
+# Настоящая камера так быстро не поворачивается, и зритель это видит
+MAX_PAN = float(settings.get("faces.max_pan", 0.35))
+# окно медианы по кадрам: гасит выбросы детектора
+SMOOTH_WIN = int(settings.get("faces.smooth_win", 5))
 
 
 class Face:
@@ -293,12 +305,7 @@ def scan_segment(path: Path, t0: float, t1: float, model,
 
 def main_face_of_segment(samples: Sequence[Sequence[Face]],
                          min_w: float = 0.0) -> Optional[Face]:
-    """Главное лицо отрезка: медианное положение по всем замерам.
-
-    Медиана, потому что окно одно на весь кусок. Погонять кроп за
-    лицом покадрово - значит получить «плавающий» монтаж, который
-    редактор потом всё равно переставит вручную.
-    """
+    """Главное лицо отрезка: медианное положение по всем замерам."""
     cands = [pick_main_face(s, min_w) for s in samples]
     cands = [f for f in cands if f is not None]
     if not cands:
@@ -306,3 +313,168 @@ def main_face_of_segment(samples: Sequence[Sequence[Face]],
     return Face(robust_center([f.cx for f in cands]),
                 robust_center([f.cy for f in cands]),
                 robust_center([f.w for f in cands]))
+
+
+# ======================================================= ведение камеры
+
+def track_segment(path: Path, t0: float, t1: float, model,
+                  sample_hz: float = TRACK_HZ,
+                  min_w: float = MIN_FACE_W) -> List[Tuple[float, Face]]:
+    """Где лицо было в каждый момент отрезка. -> [(время, Face)].
+
+    Замеров меньше, чем кадров: детектор считается на кадре, а двигать
+    окно между замерами всё равно приходится интерполяцией. При
+    медленных движениях головы 12 замеров в секунду неотличимы от 25,
+    а работы вдвое меньше.
+
+    Где лицо не нашлось, замера нет - дальше камера держит последнее
+    известное положение, а не прыгает в центр.
+    """
+    dur = max(0.0, float(t1) - float(t0))
+    if dur <= 0:
+        return []
+    import cv2
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        return []
+    n = max(2, int(round(dur * max(1.0, sample_hz))) + 1)
+    n = min(n, 400)                      # предохранитель от длинных кусков
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    out: List[Tuple[float, Face]] = []
+    try:
+        for k in range(n):
+            t = float(t0) + dur * k / (n - 1)
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                # POS_MSEC у коротких кусков промахивается мимо конца
+                if total > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES,
+                            int(total * k / (n - 1)))
+                    ok, fr = cap.read()
+                if not ok or fr is None:
+                    continue
+            face = pick_main_face(faces_in_image(fr, model), min_w)
+            if face is not None:
+                out.append((t, face))
+    finally:
+        cap.release()
+    return out
+
+
+def _median_filter(values: List[float], win: int) -> List[float]:
+    """Скользящая медиана. Убирает выброс, который накручивает
+    детектор на полсекунды: повернул голову - лицо считалось не там."""
+    if win <= 1 or len(values) < 3:
+        return list(values)
+    half = win // 2
+    out = []
+    for i in range(len(values)):
+        lo, hi = max(0, i - half), min(len(values), i + half + 1)
+        chunk = sorted(values[lo:hi])
+        out.append(chunk[len(chunk) // 2])
+    return out
+
+
+def operator_path(track: Sequence[Tuple[float, Face]], t0: float, t1: float,
+                  fps: float, deadband: float = DEADBAND,
+                  max_pan: float = MAX_PAN,
+                  smooth_win: int = SMOOTH_WIN) -> List[Optional[Face]]:
+    """Траектория камеры: по одному положению на кадр.
+
+    Здесь камера ведёт себя как оператор, а не как программа, которая
+    прыгает за точкой. Четыре правила, и каждое - от реальной порчи:
+
+    интерполяция - между замерами камера идёт плавно, а не рывками;
+    медиана - детектор иногда ошибается, и одна ошибка не должна
+      уводить кадр на полкартинки;
+    мёртвая зона - на миллиметровые колебания камера не реагирует вовсе,
+      иначе картинка дрожит;
+    предел скорости - камера не может телепортироваться. Если человек
+      выходит из кадра и возвращается, камера доедет за ним, но не
+      прыгнет, потому что настоящая камера так не умеет.
+
+    Возвращает по Face на кадр; None там, где данных не было вовсе.
+    """
+    dur = max(0.0, float(t1) - float(t0))
+    n = int(round(dur * max(1.0, fps)))
+    if n <= 0:
+        return []
+    if not track:
+        return [None] * n
+
+    # --- растягиваем замеры на каждый кадр
+    ts = [max(0.0, min(dur, t - t0)) for t, _f in track]
+    fx = [f.cx for _t, f in track]
+    fy = [f.cy for _t, f in track]
+    fw = [f.w for _t, f in track]
+    xs: List[Optional[float]] = []
+    ys: List[Optional[float]] = []
+    ws: List[Optional[float]] = []
+    j = 0
+    for i in range(n):
+        tt = dur * i / max(1, n - 1)
+        while j + 1 < len(ts) and ts[j + 1] <= tt:
+            j += 1
+        if not ts or tt < ts[0]:
+            xs.append(None)
+            ys.append(None)
+            ws.append(None)
+            continue
+        if j + 1 >= len(ts):
+            xs.append(fx[-1])
+            ys.append(fy[-1])
+            ws.append(fw[-1])
+            continue
+        span = ts[j + 1] - ts[j]
+        u = 0.0 if span <= 0 else (tt - ts[j]) / span
+        xs.append(fx[j] + (fx[j + 1] - fx[j]) * u)
+        ys.append(fy[j] + (fy[j + 1] - fy[j]) * u)
+        ws.append(fw[j] + (fw[j + 1] - fw[j]) * u)
+
+    # --- дырки заполняем последним известным: камера не забывает, куда
+    # направилась, даже если лицо на секунду потерялось
+    last_x = last_y = last_w = None
+    for i in range(n):
+        if xs[i] is not None:
+            last_x, last_y, last_w = xs[i], ys[i], ws[i]
+        else:
+            xs[i], ys[i], ws[i] = last_x, last_y, last_w
+    if last_x is None:
+        return [None] * n
+
+    # --- медиана по трём независимым осям
+    xs = _median_filter(xs, smooth_win)
+    ys = _median_filter(ys, smooth_win)
+    ws = _median_filter(ws, smooth_win)
+
+    # --- мёртвая зона и предел скорости
+    step = max(1e-6, max_pan) / max(1.0, fps)
+    cur_x, cur_y = xs[0], ys[0]
+    out: List[Optional[Face]] = []
+    for i in range(n):
+        tx, ty = xs[i], ys[i]
+        dx = tx - cur_x
+        if abs(dx) < deadband:
+            tx = cur_x
+        else:
+            cur_x += max(-step, min(step, dx))
+            tx = cur_x
+        dy = ty - cur_y
+        if abs(dy) < deadband:
+            ty = cur_y
+        else:
+            cur_y += max(-step, min(step, dy))
+            ty = cur_y
+        out.append(Face(min(max(tx, 0.0), 1.0), min(max(ty, 0.0), 1.0),
+                        min(max(ws[i], 0.0), 1.0)))
+    return out
+
+
+def crop_windows(path_faces: Sequence[Optional[Face]], src_w: int, src_h: int,
+                 aspect: float = 9 / 16,
+                 min_crop_frac: float = MIN_CROP_FRAC
+                 ) -> List[Tuple[int, int, int, int]]:
+    """Окно кропа на каждый кадр по траектории камеры."""
+    return [crop_window(f, src_w, src_h, aspect, min_crop_frac)
+            for f in path_faces]

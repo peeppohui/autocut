@@ -28,12 +28,13 @@ import csv
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
 import faces
+import settings
 
 VIDEO_EXT = (".mp4", ".mov", ".mxf", ".mkv")
 
@@ -81,6 +82,118 @@ def clip_duration(row: Dict) -> float:
         return float(row.get("duration") or 0)
     except ValueError:
         return 0.0
+
+
+def pipe_size(src_h: int, aspect: float) -> Tuple[int, int]:
+    """Размер кадра, который уходит в ffmpeg по пайпу.
+
+    Всегда один и тот же на весь кусок: если окно сужается ради лица у
+    края, кадр до него доводится до этого размера здесь, а не «как
+    получится». Иначе ffmpeg не сможет прочитать поток.
+    """
+    w = faces.even(src_h * aspect)
+    return (w, faces.even(src_h))
+
+
+def render_tracked(src: Path, dst: Path, row: Dict, width: int, height: int,
+                   speed: float, windows: List[Tuple[int, int, int, int]],
+                   src_w: int, src_h: int, fps: float,
+                   audio: str = "") -> str:
+    """Кусок с камерой, которая ведёт лицо. Возвращает "" или ошибку.
+
+    Почему не одним фильтром ffmpeg. У crop статичные x и y: посреди
+    готового ролика подвинуть окно нечем. Есть sendcmd и выражения
+    через t, но оба превращаются в нечитаемую простыню на каждый кусок.
+    Кадры режутся здесь, кодирование остаётся у ffmpeg - иначе пришлось
+    бы тащить вторую кодековую ветку со своими настройками качества.
+
+    Звук едет вторым входом с тем же окном, что и раньше.
+    """
+    t0 = max(0.0, float(row.get("in") or 0))
+    dur = clip_duration(row)
+    ow, oh = pipe_size(src_h, width / max(1, height))
+    ext = Path(audio) if (audio and Path(audio).is_file()) else None
+
+    # вход 0 - исходник, из него берём только звук: картинку мы уже
+    # порезали сами и отправляем по пайпу
+    inputs = ["-ss", f"{t0:.3f}", "-t", f"{dur:.3f}", "-i", str(src)]
+    aud_idx = 0
+    if ext:
+        inputs += ["-ss", f"{t0:.3f}", "-t", f"{dur:.3f}", "-i", str(ext)]
+        aud_idx = 1
+    inputs += ["-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{ow}x{oh}",
+               "-r", f"{fps:.6f}", "-i", "pipe:0"]
+    pipe_idx = aud_idx + 1
+
+    output = ["-map", f"{pipe_idx}:v",
+              "-vf", f"scale={width}:{height}",
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+              "-pix_fmt", "yuv420p"]
+    if ext or _has_audio(src):
+        output += ["-map", f"{aud_idx}:a:0", "-c:a", "aac", "-b:a", "192k"]
+        af = atempo_chain(speed)
+        if af:
+            output += ["-af", af]
+    else:
+        output += ["-an"]
+
+    proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error"] + inputs + output
+                            + [str(dst)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    cap = _open(src)
+    try:
+        for box in windows:
+            x, y, w, h = box
+            x = max(0, min(x, src_w - 1))
+            y = max(0, min(y, src_h - 1))
+            w = max(2, min(w, src_w - x))
+            h = max(2, min(h, src_h - y))
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            piece = frame[y:y + h, x:x + w]
+            if piece.shape[0] != h or piece.shape[1] != w:
+                # кадр короче ожидаемого - добиваем чёрным, иначе ffmpeg
+                # получит кадр не того размера и откажется читать поток
+                piece = _pad_to(piece, w, h)
+            if (w, h) != (ow, oh):
+                import cv2
+                piece = cv2.resize(piece, (ow, oh), interpolation=cv2.INTER_AREA)
+            proc.stdin.write(piece.tobytes())
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        cap.release()
+        err = (proc.stderr.read() or b"").decode("utf-8", "replace")
+        proc.wait()
+
+    if proc.returncode != 0 or not dst.is_file() or dst.stat().st_size == 0:
+        lines = [s for s in err.strip().splitlines() if s.strip()]
+        return lines[-1] if lines else f"ffmpeg код {proc.returncode}"
+    return ""
+
+
+def _open(path: Path):
+    import cv2
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Не открылось видео: {path}")
+    return cap
+
+
+def _pad_to(piece, w: int, h: int):
+    """Добить кадр до нужного размера чёрным."""
+    import numpy as np
+    ph, pw = piece.shape[:2]
+    if (ph, pw) == (h, w):
+        return piece
+    out = np.zeros((h, w, 3), dtype=piece.dtype)
+    out[:min(ph, h), :min(pw, w)] = piece[:min(ph, h), :min(pw, w)]
+    return out
 
 
 def atempo_chain(speed: float) -> str:
@@ -166,8 +279,28 @@ def cut_one(src: Path, dst: Path, row: Dict, width: int, height: int,
     return ""
 
 
+def plan_windows(path: Path, row: Dict, aspect: float, model, fps: float):
+    """Окна кропа на каждый кадр: камера ведёт лицо.
+
+    Возвращает (окна, причина). Окна пустые - режем по центру, и
+    причина объясняет почему: кусок без лица виден редактору.
+    """
+    t0 = max(0.0, float(row.get("in") or 0))
+    t1 = t0 + clip_duration(row)
+    src_w, src_h = faces.source_size(path)
+    if src_w <= 0 or src_h <= 0:
+        return [], "не удалось прочитать размер кадра"
+    track = faces.track_segment(path, t0, t1, model)
+    if not track:
+        return [], "лица не нашлось - кроп по центру"
+    path_faces = faces.operator_path(track, t0, t1, fps)
+    if not path_faces or all(f is None for f in path_faces):
+        return [], "лица не нашлось - кроп по центру"
+    return faces.crop_windows(path_faces, src_w, src_h, aspect), ""
+
+
 def plan_crop(path: Path, row: Dict, aspect: float, model):
-    """Окно кропа под лицо для одного куска.
+    """Окно кропа для одного куска.
 
     Возвращает (box, причина). box=None - режем по центру, и тогда
     причина объясняет почему: кусок без лица виден редактору, а не
@@ -212,6 +345,8 @@ def main(argv=None) -> int:
         rows = [dict(r) for r in reader]
 
     aspect = args.width / max(1, args.height)
+    # частота кадров исходника: по ней растягивается траектория камеры
+    fps = float(settings.get("project.fps", 25) or 25)
     model = None
     if not args.no_face and faces.ENABLED:
         print("Ищу лица, чтобы кроп не резал говорящего...")
@@ -242,17 +377,25 @@ def main(argv=None) -> int:
         speed = args.speed if track.upper() == "V1" else 1.0
         audio = (row.get("audio") or "").strip()
 
-        box, why = (None, "слежение выключено")
+        windows, why = ([], "слежение выключено")
+        src_w, src_h = (0, 0)
         if model is not None:
             try:
-                box, why = plan_crop(Path(src), row, aspect, model)
+                windows, why = plan_windows(Path(src), row, aspect, model,
+                                            fps)
+                src_w, src_h = faces.source_size(Path(src))
             except Exception as e:
-                box, why = None, f"сбой слежения: {str(e)[:80]}"
-        if box is not None:
+                windows, why = [], f"сбой слежения: {str(e)[:80]}"
+        if windows:
             followed += 1
 
-        err = cut_one(Path(src), dst, row, args.width, args.height, speed,
-                      box, audio)
+        if windows and src_w and src_h:
+            err = render_tracked(Path(src), dst, row, args.width, args.height,
+                                 speed, windows, src_w, src_h, fps, audio)
+        else:
+            box = windows[0] if windows else None
+            err = cut_one(Path(src), dst, row, args.width, args.height, speed,
+                          box, audio)
         if not err:
             dur_out = clip_duration(row) / speed
             new["path"] = str(dst)
@@ -267,7 +410,7 @@ def main(argv=None) -> int:
             # звук уехал внутрь файла вместе с картинкой
             new["audio"] = ""
             cut += 1
-            if why and box is None:
+            if why and not windows:
                 print(f"  кусок {i}: {why}")
         else:
             # кусок оставляем горизонтальным и говорим почему: иначе в
@@ -286,14 +429,23 @@ def main(argv=None) -> int:
                 and Path(alt_src).suffix.lower() in VIDEO_EXT:
             alt_name = f"clip{i:04d}_alt.mp4"
             alt_dst = out_dir / "clips" / alt_name
-            alt_box = None
+            alt_windows = []
+            alt_w = alt_h = 0
             if model is not None:
                 try:
-                    alt_box, _ = plan_crop(Path(alt_src), row, aspect, model)
+                    alt_windows, _ = plan_windows(Path(alt_src), row, aspect,
+                                                  model, fps)
+                    alt_w, alt_h = faces.source_size(Path(alt_src))
                 except Exception:
-                    alt_box = None
-            alt_err = cut_one(Path(alt_src), alt_dst, row, args.width,
-                              args.height, 1.0, alt_box, "")
+                    alt_windows = []
+            if alt_windows and alt_w and alt_h:
+                alt_err = render_tracked(Path(alt_src), alt_dst, row,
+                                         args.width, args.height, 1.0,
+                                         alt_windows, alt_w, alt_h, fps, "")
+            else:
+                alt_box = alt_windows[0] if alt_windows else None
+                alt_err = cut_one(Path(alt_src), alt_dst, row, args.width,
+                                  args.height, 1.0, alt_box, "")
             if not alt_err:
                 new["alt"] = alt_name
                 new["alt_path"] = str(alt_dst)
