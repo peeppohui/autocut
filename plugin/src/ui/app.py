@@ -350,14 +350,7 @@ def page_multi(parent, app):
     only_tx = T.switch(opt, 3, "Сначала только транскрипт",
                        ctk.BooleanVar(value=False),
                        "правлю текст вручную, потом жму вторую кнопку")
-    vertical = T.switch(opt, 5, "Вертикаль 9:16 для Reels и Shorts",
-                        ctk.BooleanVar(value=False),
-                        "кадр перерезается по центру и встаёт в 1080x1920. "
-                        "Перекодируются только куски монтажа, не исходники")
-    vspeed = ctk.StringVar(value="1.0")
-    T.field(opt, 6, "Скорость", vspeed,
-            "1.5 — в полтора раза быстрее, 1.0 — как есть")
-    dev = T.device_row(opt, 7)
+    dev = T.device_row(opt, 5)
 
     dst = T.card(wrap, "Результат")
     out = T.field(dst, 0, "Папка проекта", ctk.StringVar(),
@@ -373,23 +366,15 @@ def page_multi(parent, app):
         return ["--target", v] if v else []
 
     def export_args(o, timeline=None):
-        """Шаги экспорта. Вертикаль вклинивается перед Premiere.
+        """Шаги экспорта в Premiere.
 
-        Пока горизонтально - ровно то, что уже проверено импортом.
+        Ровно то, что уже проверено импортом. Вертикальный ролик живёт
+        в отдельном блоке меню: это другой формат, а не переключатель,
+        и смешивать их в одной форме значило бы держать настройки,
+        которые тут ничего не меняют.
         """
         tl = timeline or f"{o}/rz/selects.csv"
-        steps = []
-        if vertical.get():
-            steps.append(("Вертикаль 9:16",
-                          _steps.vertical_args(tl, o,
-                                               speed=float(
-                                                   vspeed.get() or 1.0))))
-            tl = f"{o}/vertical/selects.csv"
-            return steps + [("XML для Premiere",
-                             premiere_args(tl, o, two_cam.get(),
-                                           width=1080, height=1920))], tl
-        return steps + [("XML для Premiere",
-                         premiere_args(tl, o, two_cam.get()))], tl
+        return [("XML для Premiere", premiere_args(tl, o, two_cam.get()))], tl
 
     def run_from_tx():
         t = app.transcript_path.get().strip().strip('"')
@@ -711,9 +696,94 @@ def page_log(parent, app):
     return wrap
 
 
+def page_vertical(parent, app):
+    """Вертикальный ролик 9:16 из интервью: полный цикл с нуля.
+
+    Отдельный блок, а не переключатель внутри интервью, по двум
+    причинам. Формат другой: здесь ещё есть скорость и слежение за
+    лицом, и в горизонтальной сборке им нечего делать. И он требует
+    другой сборки целиком - вертикальный файл идёт с картинкой и
+    звуком внутри, поэтому Premiere получает другое окно времени.
+    """
+    wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+    wrap.grid_columnconfigure(0, weight=1)
+
+    src = T.card(wrap, "Исходники")
+    wide = T.field(src, 0, "Общий план", ctk.StringVar(), "ref.mov",
+                   browse=lambda: app.pick_file(wide, "Общий план"))
+    gcam = T.field(src, 1, "Камера гостя", ctk.StringVar(), "camera_guest.mov",
+                   browse=lambda: app.pick_file(gcam, "Камера гостя"))
+    gmic = T.field(src, 2, "Микрофон гостя", ctk.StringVar(), "_guest.wav",
+                   browse=lambda: app.pick_file(gmic, "Микрофон гостя"))
+    hmic = T.field(src, 3, "Микрофон ведущего", ctk.StringVar(), "_host.wav",
+                   browse=lambda: app.pick_file(hmic, "Микрофон ведущего"))
+
+    opt = T.card(wrap, "Формат")
+    tgt = ctk.StringVar()
+    T.field(opt, 0, "Хронометраж (ММ:СС)", tgt, "пусто — не ограничивать")
+    speed = ctk.StringVar(value="1.0")
+    T.field(opt, 1, "Скорость", speed, "1.5 — в полтора раза быстрее")
+    follow = T.switch(opt, 2, "Кроп ведёт лицо говорящего",
+                      ctk.BooleanVar(value=True),
+                      "лицо находится в кадре - окно 9:16 уезжает за ним, "
+                      "иначе режем по центру")
+    two_cam = T.switch(opt, 4, "Второй ракурс на отдельной дорожке",
+                       ctk.BooleanVar(value=True),
+                       "переключение глазком, обе дорожки вертикальные")
+    dev = T.device_row(opt, 6)
+
+    dst = T.card(wrap, "Результат")
+    out = T.field(dst, 0, "Папка проекта", ctk.StringVar(), "vertical_out",
+                  browse=lambda: app.pick_dir(out, "Куда сложить"))
+
+    def tgt_args():
+        v = tgt.get().strip()
+        return ["--target", v] if v else []
+
+    def run():
+        paths = {}
+        for var, what in ((wide, "общий план"), (gcam, "камеру гостя"),
+                          (gmic, "микрофон гостя"),
+                          (hmic, "микрофон ведущего")):
+            v = app.need(var, what)
+            if not v:
+                return
+            paths[what] = v
+        o = out.get().strip().strip('"') or str(BASE / "vertical_out")
+        Path(o).mkdir(parents=True, exist_ok=True)
+        vl = f"{o}/vertical/selects.csv"
+        app.go([
+            ("1. Синхронизация",
+             [str(ML / "sync.py"), "--ref", paths["общий план"],
+              "--cam", paths["камеру гостя"],
+              "--mic-guest", paths["микрофон гостя"],
+              "--mic-host", paths["микрофон ведущего"],
+              "--outdir", f"{o}/synced"]),
+            ("2. Рыба по тексту",
+             [str(MODES / "interview.py"),
+              "--wide", f"{o}/synced/ref.mp4",
+              "--guest-cam", f"{o}/synced/cam.mp4",
+              "--guest-mic", f"{o}/synced/mic_guest.wav",
+              "--host-mic", f"{o}/synced/mic_host.wav",
+              "--outdir", f"{o}/rz", "--device", dev.get()] + tgt_args()),
+            ("3. Вертикаль 9:16",
+             _steps.vertical_args(f"{o}/rz/selects.csv", o,
+                                  follow=follow.get(), device=dev.get())),
+            ("4. XML для Premiere",
+             premiere_args(vl, o, two_cam.get(), width=1080, height=1920)),
+            ("5. Субтитры", srt_args(vl, o)),
+        ], o)
+
+    T.btn(wrap, "Собрать вертикально", "primary", width=200,
+          command=run).pack(anchor="w", padx=T.PAD, pady=(0, T.PAD))
+    panel_result.add_to(wrap, app, out)
+    return wrap
+
+
 SUBS = {
     "Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
     "Новостной сюжет": "Лид, суть, синхроны, детали и финал по мероприятию",
+    "Вертикаль 9:16": "Короткий ролик для Reels и Shorts из интервью",
     "Настройки": "Пороги чистки речи и раскладки кадров",
     "Ход работы": "Что делает программа прямо сейчас",
     "Дайджест": "Папка исходников → раскладка по планам",
@@ -727,6 +797,7 @@ SUBS = {
 TPL = [
     ("Интервью 2 камеры", page_multi),
     ("Новостной сюжет", pages_news.page_news),
+    ("Вертикаль 9:16", page_vertical),
     ("Настройки", page_settings),
     ("Ход работы", page_log),
     ("Дайджест", page_digest),
@@ -738,6 +809,7 @@ TPL = [
 GROUPS = [
     ("Основное", [("Интервью 2 камеры", page_multi),
                   ("Новостной сюжет", pages_news.page_news),
+                  ("Вертикаль 9:16", page_vertical),
                   ("Настройки", page_settings),
                   ("Ход работы", page_log)]),
     ("Другие шаблоны", [("Дайджест", page_digest),

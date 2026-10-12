@@ -54,12 +54,18 @@ def premiere_args(timeline, project, stacked=False, music=None,
     return argv
 
 
-def vertical_args(selects, project, width=1080, height=1920, speed=1.0):
+def vertical_args(selects, project, width=1080, height=1920, speed=1.0,
+                  follow=True, device="auto"):
     """Аргументы перевода раскладки в вертикаль."""
-    return [str(ML / "vertical.py"), "--selects", str(selects),
+    argv = [str(ML / "vertical.py"), "--selects", str(selects),
             "--outdir", str(Path(project) / "vertical"),
             "--width", str(width), "--height", str(height),
-            "--speed", str(speed)]
+            "--speed", str(speed), "--device", str(device)]
+    if not follow:
+        # --no-face есть именно потому, что слежение гоняет нейросеть по
+        # каждому куску. Кто-то захочет быстрый центральный кроп.
+        argv.append("--no-face")
+    return argv
 
 
 def srt_args(timeline, project):

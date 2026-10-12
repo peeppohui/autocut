@@ -579,6 +579,80 @@ def balance_cameras(rows, share_a: float = 0.7, shot_min: float = 2.0,
     return out
 
 
+def face_scan(chunks, cams: Dict[str, Path]):
+    """Где в каждом куске и в каждой камере есть вообще лицо.
+
+    Возвращает {номер куска: {камера: bool}}, либо {} если слежение
+    выключено или модель не загрузилась.
+
+    Работает не по исходникам, а по отрезкам готовой рыбы: проверять
+    два часа ради сотни замеров незачем, а рыба - это минуты.
+    """
+    import faces
+    out = {}
+    n = int(settings.get("faces.samples_per_clip", 3))
+    min_w = float(settings.get("faces.min_face_w", 0.10))
+    try:
+        import detect
+        model = detect.load_yolo(str(settings.get("faces.model",
+                                                    "yolov8n-pose.pt")),
+                                  str(settings.get("interview.device", "auto")))
+    except Exception as e:
+        print(f"Слежение за лицом отключено: {str(e)[:160]}")
+        return out
+    blank = 0
+    for idx, (i, o, _sp, _text) in enumerate(chunks):
+        per = {}
+        for key, path in cams.items():
+            p = Path(path)
+            if not p.is_file():
+                per[key] = False
+                continue
+            try:
+                samples = faces.scan_segment(p, i, o, model, n)
+            except Exception:
+                per[key] = False
+                continue
+            per[key] = faces.has_usable_face(samples, 0.5, min_w)
+        out[idx] = per
+        if per and not any(per.values()):
+            blank += 1
+    if blank:
+        print(f"  в {blank} кусках лица нет ни в одной камере — там останется "
+              f"то, что есть.")
+    return out
+
+
+def face_guard(planned, faces_ok):
+    """Последнее слово по камере: где в желаемом ракурсе лица нет, а в
+    запасном есть - берём запасной.
+
+    Проверка идёт ПОСЛЕ balance_cameras, и это не случайно. Там доля
+    и длина кадра - это вкус. Лицо в кадре - это «должно». Когда они
+    спорят, выигрывает то, без чего ролик нельзя выпустить: кадр с
+    пустотой никто не отсмотрит дважды.
+
+    faces_ok: {номер куска: {камера: bool}} из face_scan. Пустой словарь
+    означает «слежение не работало» - тогда ничего не трогаем.
+    """
+    if not faces_ok:
+        return planned, 0
+    fixed, swaps = [], 0
+    for idx, row in enumerate(planned):
+        i, o, sp, text, want = row
+        per = faces_ok.get(idx)
+        if not per:
+            fixed.append(row)
+            continue
+        other = "wide" if want == "gcam" else "gcam"
+        if not per.get(want, False) and per.get(other, False):
+            fixed.append((i, o, sp, text, other))
+            swaps += 1
+        else:
+            fixed.append(row)
+    return fixed, swaps
+
+
 def plan_cameras(chunks, wide: Path, gcam: Path, cache_dir: Path):
     """К каждому куску решаем, какая камера основная.
 
@@ -614,9 +688,15 @@ def plan_cameras(chunks, wide: Path, gcam: Path, cache_dir: Path):
         opt_max=float(settings.get("interview_cuts.shot_optimal_max_sec", 7.0)),
         shot_max=float(settings.get("interview_cuts.shot_max_sec", 12.0)),
     )
-    if dropped or swapped:
+    face_swapped = 0
+    if bool(settings.get("faces.enabled", True)) \
+            and bool(settings.get("faces.swap_camera_when_blank", True)):
+        planned, face_swapped = face_guard(
+            planned, face_scan(chunks, {"wide": wide, "gcam": gcam}))
+    if dropped or swapped or face_swapped:
         print(f"Камера: выброшено {dropped} кусков без картинки, "
-              f"у {swapped} взят запасной ракурс.")
+              f"у {swapped} взят запасной ракурс, "
+              f"у {face_swapped} - ракурс с лицом вместо пустого.")
     return planned, dropped, swapped
 
 

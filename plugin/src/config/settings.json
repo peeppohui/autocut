@@ -119,6 +119,19 @@
     "min_visible_keypoints": 5
   },
 
+  "faces": {
+    "_note": "src/ml/faces.py — поиск лиц и кроп 9:16 под говорящего. min_face_w отсекает мелкие лица (на общем плане в вертикали от них останутся глаза). min_crop_frac — насколько можно ужать окно, прежде чем картинка станет мыльной; ниже этого лучше оставить лицо чуть не по центру. follow_faces выключает слежение и возвращает геометрический центр.",
+    "enabled": true,
+    "model": "yolov8n-pose.pt",
+    "conf": 0.30,
+    "detect_conf": 0.25,
+    "min_face_w": 0.10,
+    "min_crop_frac": 0.70,
+    "samples_per_clip": 3,
+    "follow_faces": true,
+    "swap_camera_when_blank": true
+  },
+
   "sync": {
     "_note": "src/ml/sync.py — сведение камер и микрофонов по звуку. global_* и mic_mismatch_* читаются только при согласовании больше двух дорожек; без них берутся зашитые значения.",
     "max_lag_sec": 60.0,
