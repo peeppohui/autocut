@@ -220,6 +220,101 @@ ok("синхрон без транскрипта не запускает сбо�
 ok("и предупреждение про транскрипт есть",
    any("транскрипт" in w.lower() for w in warned), str(warned))
 
+# --- кнопка «Показать» на странице Просмотр ---
+# Раньше страница делала `import preview`, но app.py не подключал
+# модульные папки через bootstrap: src/io не был в sys.path, кнопка
+# падала с ModuleNotFoundError. Тест нажимает её по-настоящему:
+# tkinter глотает исключение из callback и просто молчит, поэтому
+# без явного вызова это не всплыло бы.
+_pre = _P(tempfile.mkdtemp())
+(_pre / "selects.csv").write_text(
+    "file,in,out,duration,path\na.mp4,0,10,10,%s\n" % (_pre / "a.mp4"),
+    encoding="utf-8")
+raised = []
+try:
+    fill_and_press("Просмотр", "Показать", [str(_pre / "selects.csv")])
+except Exception as e:                       # noqa: BLE001 - нам важно любое
+    raised.append(e)
+ok("«Показать» не падает (модульные папки в пути)", not raised, str(raised))
+
+# --- таймлайн ---
+TL = A.pages_timeline
+
+
+def _row(**kw):
+    base = {"file": "a.mp4", "duration": 10.0, "in": 0.0, "out": 10.0,
+            "path": "", "audio": "", "alt": "", "alt_path": "",
+            "track": "V1", "hero": "", "desc": "", "plan": ""}
+    base.update(kw)
+    return base
+
+
+# три куска: первый с микрофоном, второй с вторым ракурсом, третий закадр
+tl_rows = [
+    _row(file="a.mp4", audio="m1.wav", alt="b.mp4", alt_path="b.mp4"),
+    _row(file="b.mp4", audio="m2.wav", duration=5.0),
+    _row(file="vo.wav", track="A2", audio="", duration=3.0),
+]
+tl = TL.build_timeline(tl_rows)
+tl_names = [l["name"] for l in tl["lanes"]]
+ok("хронометраж сходится с суммой кусков",
+   abs(tl["total"] - 18.0) < 1e-6, str(tl["total"]))
+ok("видео выше звука",
+   all(l["kind"] in ("video", "alt") for l in tl["lanes"][:2]),
+   str(tl_names))
+ok("второй ракурс завёл отдельную дорожку", "V2" in tl_names, str(tl_names))
+ok("оба микрофона на своих дорожках",
+   sum(1 for n in tl_names if n.startswith("♪")) == 3, str(tl_names))
+# куски идут подряд, без зазоров - так же их складывает premiere.py
+v1 = next(l for l in tl["lanes"] if l["name"] == "V1")
+ok("куски на V1 стоят подряд",
+   [round(i["start"], 3) for i in v1["items"]] == [0.0, 10.0],
+   str([(i["start"], i["dur"]) for i in v1["items"]]))
+ok("закадр без картинки не попал на видеодорожку",
+   all(i["row"] != 2 for i in v1["items"]),
+   str([i["row"] for i in v1["items"]]))
+ok("микрофон первого куска тянется на его длину",
+   round(v1["items"][0]["dur"], 3) == 10.0, str(v1["items"][0]["dur"]))
+ok("закадр лёг на самостоятельную дорожку",
+   any(l["kind"] == "audio" and any(i["role"] == "own" for i in l["items"])
+       for l in tl["lanes"]), str(tl_names))
+
+# пустой кусок не должен исчезнуть с дорожки
+thin = TL.build_timeline([_row(duration=0.0)])
+ok("нулевой кусок всё равно виден и кликабелен",
+   thin["lanes"] and thin["lanes"][0]["items"][0]["dur"] > 0,
+   str(thin["lanes"]))
+
+# --- смена ракурса ---
+sw = _row(file="a.mp4", path="a.mp4", alt="b.mp4", alt_path="b.mp4")
+ok("ракурсы меняются местами", TL.swap_angle(sw) is True)
+ok("после обмена верхним стал второй ракурс",
+   sw["file"] == "b.mp4" and sw["alt"] == "a.mp4", str(sw))
+ok("пути тоже поменялись",
+   sw["path"] == "b.mp4" and sw["alt_path"] == "a.mp4", str(sw))
+nosw = _row(file="a.mp4", alt="", alt_path="")
+ok("без второго ракурса обмен отказывает", TL.swap_angle(nosw) is False)
+
+# --- сохранение с копией ---
+_save_dir = _P(tempfile.mkdtemp())
+_scsv = _save_dir / "selects.csv"
+_scsv.write_text("file,duration,track,hero\na.mp4,10,V1,ведущий\n"
+                 "b.mp4,5,V2,гость\n", encoding="utf-8")
+_rows, _fields = TL.read_rows(_scsv)
+ok("прочитаны обе строки", len(_rows) == 2, str(len(_rows)))
+ok("числа стали числами", _rows[1]["duration"] == 5.0, str(_rows[1]))
+_rows.pop(0)
+TL.write_rows(_scsv, _rows, _fields)
+ok("исходный файл отдан под копию", _scsv.with_suffix(".csv.bak").is_file())
+_back, _bf = TL.read_rows(_scsv.with_suffix(".csv.bak"))
+ok("в копии остались обе строки", len(_back) == 2, str(len(_back)))
+_after, _af = TL.read_rows(_scsv)
+ok("в новом файле куска на одну меньше", len(_after) == 1, str(len(_after)))
+ok("колонки не потерялись при записи",
+   _af == ["file", "duration", "track", "hero"], str(_af))
+ok("колонки пережили редактирование без перестановок",
+   _after[0]["hero"] == "гость", str(_after[0]))
+
 app.destroy()
 print()
 if fail:

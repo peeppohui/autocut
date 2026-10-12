@@ -37,9 +37,15 @@ IO = SRC / "io"                              # premiere, preview
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(SRC / "config"))
 
+# Модульные папки (core, modes, io, ml) лежат рядом и по имени не видны
+# друг другу. Без этого страница «Просмотр» падала с
+# «No module named 'preview» — кнопка «Показать» молча ничего не делала.
+import bootstrap  # noqa: E402,F401
+
 import theme as T                            # noqa: E402
 import settings                              # noqa: E402
 import pages_news                            # noqa: E402
+import pages_timeline                        # noqa: E402
 
 
 # ==================================================================
@@ -735,6 +741,7 @@ def page_log(parent, app):
 SUBS = {
     "Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
     "Новостной сюжет": "Лид, суть, синхроны, детали и финал по мероприятию",
+    "Таймлайн": "Дорожки монтажа и ручная правка раскладки",
     "Мультикам": "Настоящий мультикам в Premiere по общему таймкоду",
     "Просмотр": "Оценка монтажа без захода в Premiere",
     "Настройки": "Пороги чистки речи и раскладки кадров",
@@ -747,6 +754,7 @@ SUBS = {
 TPL = [
     ("Интервью 2 камеры", page_multi),
     ("Новостной сюжет", pages_news.page_news),
+    ("Таймлайн", pages_timeline.page_timeline),
     ("Мультикам", page_mc),
     ("Просмотр", page_preview),
     ("Настройки", page_settings),
@@ -760,6 +768,7 @@ TPL = [
 GROUPS = [
     ("Основное", [("Интервью 2 камеры", page_multi),
                   ("Новостной сюжет", pages_news.page_news),
+                  ("Таймлайн", pages_timeline.page_timeline),
                   ("Мультикам", page_mc),
                   ("Просмотр", page_preview),
                   ("Настройки", page_settings),
