@@ -98,7 +98,8 @@ def field(body, row, label, var, placeholder="", browse=None, width=None):
     ctk.CTkEntry(body, textvariable=var, height=36, corner_radius=8,
                  fg_color=RAISED, border_color=BORDER, border_width=1,
                  text_color=TEXT, font=font(13),
-                 placeholder_text=placeholder).grid(
+                 placeholder_text=placeholder,
+                 placeholder_text_color=MUTED).grid(
                      row=row, column=1, sticky="ew", pady=5)
     if browse is not None:
         btn(body, "…", "ghost", width=36, command=browse).grid(
@@ -155,7 +156,8 @@ def mini_field(parent, var, placeholder="", browse=None):
     ctk.CTkEntry(row, textvariable=var, height=32, corner_radius=8,
                  fg_color=SURFACE, border_color=BORDER, border_width=1,
                  text_color=TEXT, font=font(12),
-                 placeholder_text=placeholder).pack(side="left", fill="x",
+                 placeholder_text=placeholder,
+                 placeholder_text_color=MUTED).pack(side="left", fill="x",
                                                    expand=True,
                                                    padx=(0, 6) if browse else 0)
     if browse is not None:

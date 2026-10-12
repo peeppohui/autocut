@@ -45,7 +45,7 @@ import bootstrap  # noqa: E402,F401
 import theme as T                            # noqa: E402
 import settings                              # noqa: E402
 import pages_news                            # noqa: E402
-import pages_timeline                        # noqa: E402
+import panel_result                          # noqa: E402
 
 
 # ==================================================================
@@ -120,6 +120,10 @@ class App(ctk.CTk):
         # просят две кнопки на странице интервью, держим одну переменную
         self.transcript_path = ctk.StringVar()
         self._nav = {}
+        # панели разбора монтажа на текущей странице. После сборки они
+        # должны сами подхватить новый результат, иначе пришлось бы
+        # жать «Показать» руками
+        self.panels = []
 
         # ---- левая панель ----
         side = ctk.CTkFrame(self, fg_color=T.SURFACE, corner_radius=0,
@@ -191,6 +195,8 @@ class App(ctk.CTk):
     def show(self, name):
         for w in self.host.winfo_children():
             w.destroy()
+        # страница пересоздаётся, её панели больше не существуют
+        self.panels.clear()
         self.title_lbl.configure(text=name)
         self.sub_lbl.configure(text=SUBS.get(name, ""))
         for n, b in self._nav.items():
@@ -256,6 +262,15 @@ class App(ctk.CTk):
             self.log("ГОТОВО." if ok else "ОСТАНОВЛЕНО С ОШИБКОЙ — читай лог выше.")
             if ok and self.result_dir and Path(self.result_dir).exists():
                 self.open_btn.configure(state="normal")
+                # монтаж только что пересобрался - разбор должен показать
+                # новую раскладку сам, без лишнего клика
+                if self.result_dir:
+                    for p in list(self.panels):
+                        try:
+                            p.dir_var.set(str(self.result_dir))
+                        except Exception:
+                            pass
+                self.refresh_panels()
             if ok:
                 try:
                     self.bell()
@@ -285,6 +300,18 @@ class App(ctk.CTk):
         латать каждый новый вызов в каждой странице.
         """
         messagebox.showwarning("AutoCut", text)
+
+    def register_panel(self, panel):
+        """Панель разбора монтажа сама переживёт следующую сборку."""
+        self.panels.append(panel)
+
+    def refresh_panels(self):
+        for p in list(self.panels):
+            try:
+                p.load()
+            except Exception as e:
+                # панель - украшение, ронять из-за неё сборку нельзя
+                self.log(f"Разбор монтажа не обновился: {type(e).__name__}: {e}")
 
 
 # ==================================================================
@@ -400,95 +427,7 @@ def page_multi(parent, app):
         side="left")
     T.btn(row, "Собрать из правленого текста", "ghost",
           command=run_from_tx).pack(side="left", padx=10)
-    return wrap
-
-
-def page_preview(parent, app):
-    """Контактный лист рыбы: кадр каждого куска и кто говорит."""
-    wrap = ctk.CTkFrame(parent, fg_color="transparent")
-
-    src = T.card(wrap, "Рыба", "Укажи selects.csv или папку проекта")
-    sel = ctk.StringVar()
-    T.field(src, 0, "selects.csv", sel, "папка\\rz\\selects.csv",
-            browse=lambda: app.pick_file(sel, "selects.csv"))
-    info = ctk.CTkLabel(src, text="", text_color=T.MUTED, anchor="w",
-                        font=T.font(12))
-    info.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
-
-    grid = ctk.CTkScrollableFrame(wrap, fg_color="transparent")
-    grid.pack(fill="both", expand=True, padx=T.PAD, pady=(0, T.PAD))
-    for c in range(4):
-        grid.grid_columnconfigure(c, weight=1, uniform="t")
-
-    def load():
-        for w in grid.winfo_children():
-            w.destroy()
-        p = Path(sel.get().strip().strip('"'))
-        if p.is_dir():
-            p = p / "rz" / "selects.csv"
-        if not p.is_file():
-            info.configure(text="Файл не найден")
-            return
-        import preview as pv
-        rows = pv.make_thumbs(p, p.parent / "thumbs")
-        if not rows:
-            info.configure(text="В файле нет кусков с таймкодом")
-            return
-        dur = sum(r["out"] - r["in"] for r in rows)
-        info.configure(text=f"{len(rows)} кусков · "
-                            f"{int(dur // 60)}:{int(dur % 60):02d}")
-        keep = []
-        for k, r in enumerate(rows):
-            cell = ctk.CTkFrame(grid, fg_color=T.SURFACE, corner_radius=8)
-            cell.grid(row=k // 4, column=k % 4, sticky="nsew",
-                      padx=4, pady=4)
-            th = r.get("thumb")
-            if th and Path(th).is_file():
-                img = tk.PhotoImage(file=th)
-                img = img.subsample(2, 2)   # превью уже 384 -> 192
-                keep.append(img)           # без ссылки сборщик уберёт
-                ctk.CTkLabel(cell, text="", image=img, height=92,
-                             corner_radius=6).pack(fill="x", padx=8,
-                                                    pady=(8, 4))
-            else:
-                ctk.CTkLabel(cell, text="", height=92, corner_radius=6,
-                             fg_color=T.RAISED).pack(fill="x", padx=8,
-                                                    pady=(8, 4))
-            ctk.CTkLabel(cell, text=f"{r.get('hero') or '-'} · "
-                                     f"{r['in']:.1f}с",
-                         text_color=T.ACCENT, anchor="w",
-                         font=T.font(11, "bold")).pack(anchor="w", padx=8)
-            ctk.CTkLabel(cell, text=(r.get("desc") or "")[:70],
-                         text_color=T.MUTED, anchor="w", font=T.font(11),
-                         wraplength=150, justify="left").pack(anchor="w",
-                                                              padx=8,
-                                                              pady=(0, 8))
-        grid.keep_imgs = keep
-
-    def open_preview():
-        p = Path(sel.get().strip().strip('"'))
-        if p.is_dir():
-            p = p / "rz" / "selects.csv"
-        if not p.is_file():
-            messagebox.showwarning("AutoCut", "Сначала укажи selects.csv")
-            return
-        out_mp4 = p.parent.parent / "preview.mp4"
-
-        def open_when_ready():
-            if out_mp4.is_file():
-                try:
-                    os.startfile(out_mp4)
-                except Exception:
-                    pass
-        app.go([("Сборка превью", [str(IO / "preview.py"), "--selects", str(p),
-                                   "--out", str(out_mp4)])], str(p.parent))
-        app.after(400, open_when_ready)
-
-    row = ctk.CTkFrame(wrap, fg_color="transparent")
-    row.pack(fill="x", padx=T.PAD, pady=(0, T.PAD))
-    T.btn(row, "Показать", "ghost", width=140, command=load).pack(side="left")
-    T.btn(row, "Собрать превью и открыть", "primary",
-          command=open_preview).pack(side="left", padx=10)
+    panel_result.add_to(wrap, app, out, two_cam)
     return wrap
 
 
@@ -667,6 +606,7 @@ def page_digest(parent, app):
 
     T.btn(wrap, "Собрать рыбу", "primary", width=180, command=run).pack(
         anchor="w", padx=T.PAD, pady=(0, T.PAD))
+    panel_result.add_to(wrap, app, out)
     return wrap
 
 
@@ -701,6 +641,7 @@ def page_single(parent, app):
 
     T.btn(wrap, "Собрать рыбу", "primary", width=180, command=run).pack(
         anchor="w", padx=T.PAD, pady=(0, T.PAD))
+    panel_result.add_to(wrap, app, out)
     return wrap
 
 
@@ -741,9 +682,7 @@ def page_log(parent, app):
 SUBS = {
     "Интервью 2 камеры": "Две камеры, два микрофона, сборка в Premiere",
     "Новостной сюжет": "Лид, суть, синхроны, детали и финал по мероприятию",
-    "Таймлайн": "Дорожки монтажа и ручная правка раскладки",
     "Мультикам": "Настоящий мультикам в Premiere по общему таймкоду",
-    "Просмотр": "Оценка монтажа без захода в Premiere",
     "Настройки": "Пороги чистки речи и раскладки кадров",
     "Ход работы": "Что делает программа прямо сейчас",
     "Дайджест": "Папка исходников → раскладка по планам",
@@ -751,12 +690,13 @@ SUBS = {
     "Проверка готового": "Что лежит в собранном монтаже",
 }
 
+# Отдельных страниц «Таймлайн» и «Просмотр» больше нет. Разбор монтажа
+# живёт внутри блока, который его собрал: чтобы посмотреть дорожки,
+# не нужно гадать, в какой папке лежит результат.
 TPL = [
     ("Интервью 2 камеры", page_multi),
     ("Новостной сюжет", pages_news.page_news),
-    ("Таймлайн", pages_timeline.page_timeline),
     ("Мультикам", page_mc),
-    ("Просмотр", page_preview),
     ("Настройки", page_settings),
     ("Ход работы", page_log),
     ("Дайджест", page_digest),
@@ -768,9 +708,7 @@ TPL = [
 GROUPS = [
     ("Основное", [("Интервью 2 камеры", page_multi),
                   ("Новостной сюжет", pages_news.page_news),
-                  ("Таймлайн", pages_timeline.page_timeline),
                   ("Мультикам", page_mc),
-                  ("Просмотр", page_preview),
                   ("Настройки", page_settings),
                   ("Ход работы", page_log)]),
     ("Другие шаблоны", [("Дайджест", page_digest),

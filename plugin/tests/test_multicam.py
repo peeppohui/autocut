@@ -204,6 +204,26 @@ with tempfile.TemporaryDirectory() as td:
        all("totalExplodedTrackCount" not in tr.attrib for tr in st_at),
        str([tr.attrib for tr in st_at]))
 
+    # =========================================================
+    # Раскладку правят руками, часто в Excel. Лишняя запятая в строке
+    # даёт колонок больше, чем в заголовке, и DictReader складывает их
+    # в список. Раньше экспорт на этом падал с AttributeError - то
+    # есть на самом последнем шаге, после всей работы.
+    # =========================================================
+    odd = td / "odd.csv"
+    with open(odd, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["file", "duration", "in", "out", "path"])
+        w.writerow(["cam.mp4", 4.0, 10, 110, str(a), "лишний", "ещё"])
+    odd_clips = premiere.resolve_media(premiere.load_timeline(odd), td)
+    ok("лишние колонки не роняют экспорт", len(odd_clips) == 1,
+       str(len(odd_clips)))
+    ok("и кусок остался целым", odd_clips[0]["duration"] == 4.0,
+       str(odd_clips[0]["duration"]))
+    odd_xml = premiere.build_fcp7(list(odd_clips), fps=25)
+    ok("XML с такой раскладкой собирается",
+       not premiere.check_xml(odd_xml), str(premiere.check_xml(odd_xml)))
+
 print()
 if fail:
     print(f"MULTICAM FAIL ({len(fail)}): {fail}")

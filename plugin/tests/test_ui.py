@@ -162,15 +162,18 @@ fill_and_press("Новостной сюжет", "Собрать сюжет")
 ok("пустой сюжет не запускает сборку", len(captured) == before)
 ok("и объясняет, чего не хватает", bool(warned), str(warned))
 
-# полная сборка: заполняем первого спикера. Порядок полей соответствует
-# порядку их появления на странице: спикер, перебивки, закадр, стендап,
-# папка результата. Закадр и стендап оставляем пустыми - они не обязательны
+# полная сборка. Порядок полей - как на странице: сначала «Куда
+# сложить», потом подготовка (4 поля синхронизации), потом строка
+# спикера (имя, должность, видео, микрофон, транскрипт), дальше
+# перебивки, закадр и стендап. Подготовку оставляем пустой: собранный
+# проект уже есть, синхронизация не нужна.
 tx = FAKE.parent / "transcript.txt"
 tx.write_text("Ну вот в 2024 году произошёл рекорд и скандал",
               encoding="utf-8")
-fill_and_press("Новостной сюжет", "Собрать сюжет",
-               [str(FAKE), "продюсер", str(FAKE), "", str(tx),
-                "", "", "", "", "", FAKE_DIR])
+NEWS_VALS = [FAKE_DIR, "", "", "", "",
+             str(FAKE), "продюсер", str(FAKE), "", str(tx),
+             "", "", "", "", ""]
+fill_and_press("Новостной сюжет", "Собрать сюжет", list(NEWS_VALS))
 news_steps = [t for t, _ in captured[-1]]
 ok("сюжет: шаги по порядку",
    news_steps == ["1. Раскладка сюжета", "2. XML для Premiere", "3. Субтитры"],
@@ -202,9 +205,9 @@ if spec_path.is_file():
     ok("без стендапа поле standup не добавляется", "standup" not in spec)
 
 # та же сборка, но перебивки указаны - поле обязано появиться в spec
-fill_and_press("Новостной сюжет", "Собрать сюжет",
-               [str(FAKE), "продюсер", str(FAKE), "", str(tx),
-                FAKE_DIR, "", "", "", "", FAKE_DIR])
+_broll_vals = list(NEWS_VALS)
+_broll_vals[10] = FAKE_DIR          # папка с перебивками
+fill_and_press("Новостной сюжет", "Собрать сюжет", _broll_vals)
 spec2 = _json.loads(spec_path.read_text(encoding="utf-8"))
 ok("перебивки попадают в spec",
    [_P(p).name for p in spec2.get("broll", [])] == ["interview.mp4"],
@@ -213,32 +216,110 @@ ok("перебивки попадают в spec",
 # синхрон без транскрипта - лид не выбрать, это надо сказать заранее
 warned.clear()
 before = len(captured)
-fill_and_press("Новостной сюжет", "Собрать сюжет",
-               [str(FAKE), "", str(FAKE), "", "",
-                FAKE_DIR, "", "", "", "", FAKE_DIR])
+_no_tx = list(NEWS_VALS)
+_no_tx[9] = ""                    # транскрипт пустой
+fill_and_press("Новостной сюжет", "Собрать сюжет", _no_tx)
 ok("синхрон без транскрипта не запускает сборку", len(captured) == before)
 ok("и предупреждение про транскрипт есть",
    any("транскрипт" in w.lower() for w in warned), str(warned))
 
-# --- кнопка «Показать» на странице Просмотр ---
-# Раньше страница делала `import preview`, но app.py не подключал
-# модульные папки через bootstrap: src/io не был в sys.path, кнопка
-# падала с ModuleNotFoundError. Тест нажимает её по-настоящему:
-# tkinter глотает исключение из callback и просто молчит, поэтому
-# без явного вызова это не всплыло бы.
-_pre = _P(tempfile.mkdtemp())
-(_pre / "selects.csv").write_text(
-    "file,in,out,duration,path\na.mp4,0,10,10,%s\n" % (_pre / "a.mp4"),
-    encoding="utf-8")
-raised = []
-try:
-    fill_and_press("Просмотр", "Показать", [str(_pre / "selects.csv")])
-except Exception as e:                       # noqa: BLE001 - нам важно любое
-    raised.append(e)
-ok("«Показать» не падает (модульные папки в пути)", not raised, str(raised))
+# пустая папка - не ошибка, а понятное сообщение
+_empty = _P(tempfile.mkdtemp())
+app.show("Интервью 2 камеры")
+app.update_idletasks()
+panel = app.panels[0]
+panel.dir_var.set(str(_empty))
+ok("в пустой папке панель не падает", panel.load() is False)
+ok("и говорит, что раскладки нет", "раскладки" in panel.info.cget("text"),
+   panel.info.cget("text"))
 
-# --- таймлайн ---
-TL = A.pages_timeline
+# --- блок самодостаточен: свои шаги внутри, без «сходи в другой блок» ---
+app.show("Новостной сюжет")
+app.update_idletasks()
+_page = app.host.winfo_children()[0]
+_joined = " ".join(
+    w.cget("text") for w in all_widgets(_page)
+    if isinstance(w, A.ctk.CTkLabel) and w.cget("text"))
+_buttons = [w.cget("text") for w in all_widgets(_page)
+            if isinstance(w, A.ctk.CTkButton)]
+ok("сюжет никого не отправляет в другой блок",
+   "Интервью 2 камер" not in _joined, _joined[:200])
+ok("у сюжета своя синхронизация", "Синхронизировать" in _buttons,
+   str(_buttons))
+ok("у сюжета своё распознавание речи", "Распознать речь" in _buttons,
+   str(_buttons))
+ok("у сюжета есть автозаполнение полей", "Подставить" in _buttons,
+   str(_buttons))
+
+# --- разбор монтажа встроен в блоки сборки ---
+# Отдельных страниц «Таймлайн» и «Просмотр» больше нет: разбор должен
+# лежать в том же блоке, который собрал монтаж.
+PR = A.panel_result
+ok("отдельной страницы «Таймлайн» не осталось",
+   not any(n == "Таймлайн" for n, _ in A.TPL))
+ok("отдельной страницы «Просмотр» не осталось",
+   not any(n == "Просмотр" for n, _ in A.TPL))
+
+with_panel = []
+for n, _ in A.TPL:
+    app.show(n)
+    app.update_idletasks()
+    if app.panels:
+        with_panel.append(n)
+ok("разбор есть в блоках, которые что-то собирают",
+   set(with_panel) == {"Интервью 2 камеры", "Новостной сюжет", "Дайджест",
+                       "Интервью 1 видео"}, str(with_panel))
+
+app.show("Настройки")
+app.update_idletasks()
+ok("в «Настройках» панели нет", not app.panels)
+
+# панель ловит раскладку в папке проекта
+_proj = _P(tempfile.mkdtemp())
+(_proj / "rz").mkdir()
+(_proj / "rz" / "selects.csv").write_text(
+    "file,duration,in,out,track,hero,path,alt,alt_path,audio\n"
+    "a.mp4,10,0,10,V1,Ведущий,%s,b.mp4,%s,m1.wav\n"
+    "b.mp4,5,0,5,V1,Гость,%s,,,m2.wav\n"
+    % (_proj / "a.mp4", _proj / "b.mp4", _proj / "b.mp4"),
+    encoding="utf-8")
+app.show("Интервью 2 камеры")
+app.update_idletasks()
+panel = app.panels[0]
+panel.dir_var.set(str(_proj))
+ok("панель прочитала раскладку", panel.load() is True)
+ok("панель увидела оба куска", len(panel.rows) == 2, str(len(panel.rows)))
+ok("нашлась дорожка второго ракурса",
+   any(l["name"] == "V2" for l in PR.TL.build_timeline(panel.rows)["lanes"]))
+ok("панель показывает хронометраж", "15" in panel.info.cget("text").replace(
+    ":", ""), panel.info.cget("text"))# раскладку правят руками, часто в Excel - лишняя запятая не должна
+# ронять ни панель, ни экспорт
+_broken = _P(tempfile.mkdtemp())
+(_broken / "selects.csv").write_text(
+    "file,duration,in,out,track,path\n"
+    "a.mp4,10,0,10,V1,%s,,,лишнее\n" % (_broken / "a.mp4"),
+    encoding="utf-8")
+_br, _bf = PR.TL.read_rows(_broken / "selects.csv")
+ok("лишние колонки в CSV не роняют чтение", len(_br) == 1, str(len(_br)))
+ok("и не попадают в колонки", all(k != "__extra__" for k in _br[0]),
+   str(list(_br[0])))
+
+# правка через панель: выкинуть кусок и пересобрать
+panel.dir_var.set(str(_proj))
+panel.load()
+panel._set_sel(0)
+ok("после выбора активна кнопка удаления",
+   panel.b_drop.cget("state") == "normal")
+panel.drop()
+ok("после удаления кусков на одну меньше", len(panel.rows) == 1,
+   str(len(panel.rows)))
+ok("панель помечает несохранённые правки", panel.dirty is True)
+panel._set_sel(None)
+ok("кнопка удаления снова неактивна",
+   panel.b_drop.cget("state") == "disabled")
+
+# --- чистая логика дорожек ---
+TL = PR.TL
 
 
 def _row(**kw):

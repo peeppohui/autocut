@@ -77,10 +77,22 @@ except ImportError:
 def load_timeline(path: Path) -> List[Dict]:
     rows: List[Dict] = []
     with open(path, encoding="utf-8-sig", newline="") as f:
-        r = csv.DictReader(f)
+        r = csv.DictReader(f, restkey="__extra__", restval="")
         for row in r:
-            # нормализуем ключи к нижнему регистру
-            row = { (k or "").strip().lower(): (v or "").strip() for k, v in row.items() }
+            # нормализуем ключи к нижнему регистру. Лишние колонки
+            # (их больше, чем в заголовке) DictReader кладёт списком -
+            # такое бывает после правки раскладки в Excel, и раньше
+            # экспорт на этом падал с AttributeError.
+            clean = {}
+            for k, v in row.items():
+                if k is None or k == "__extra__":
+                    continue
+                if isinstance(v, (list, tuple)):
+                    continue
+                key = k.strip().lower()
+                if key:
+                    clean[key] = str(v or "").strip()
+            row = clean
             if not row.get("file"):
                 continue
             try:
