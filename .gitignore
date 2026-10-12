@@ -53,6 +53,23 @@ sheets/
 shots*/
 *_preview/
 # Временные файлы сборки превью
+# Секреты. Токены Яндекс.Диска и прочее никогда не должны попасть
+# в публичный репозиторий.
+.env
+.env.*
+*.env
+*_token.txt
+*token*.json
+*.pem
+*.key
+
+# Артефакты, которые делает сам AutoCut
+multicam/
+thumbs/
+*.srt
+*.png
+!plugin/src/ui/assets/*.png
+
 plugin/src/io/_ffconcat.tmp
 _preview_tmp/
 plugin/src/ui/assets/_check_*.png

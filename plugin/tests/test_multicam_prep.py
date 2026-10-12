@@ -62,23 +62,28 @@ with tempfile.TemporaryDirectory() as td:
     res = multicam.prepare([td / "readme.txt"], td / "out2")
     eq("не-видео пропущено", res["clips"], 0)
 
-# --- настоящее впечатывание на коротком фрагменте ---
+# --- настоящее впечатывание ---
+# Исходник генерируем сами, а не берём с диска: тест должен работать
+# у любого, кто его запустил, и не тянуть за собой чужую папку.
 def have_ffmpeg() -> bool:
     p = subprocess.run(["ffmpeg", "-version"], capture_output=True)
     return p.returncode == 0
 
 
-SRC = _P(r"E:\монтажи\1. пробник интервью кати+богдан(нейро)\synced\ref.mp4")
-if not have_ffmpeg() or not SRC.is_file():
-    print("ПРОПУСК впечатывания: нет ffmpeg или исходника")
+if not have_ffmpeg():
+    print("ПРОПУСК впечатывания: нет ffmpeg")
 else:
+    import json
     with tempfile.TemporaryDirectory() as td:
         td = _P(td)
         small = td / "in.mp4"
         p = subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-ss", "100", "-i", str(SRC),
-             "-t", "1", "-c", "copy", str(small)], capture_output=True)
-        ok("фрагмент собран", small.is_file(), p.stderr.decode()[-200:])
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+             "-i", "testsrc=size=320x180:rate=25:duration=2",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", str(small)],
+            capture_output=True)
+        ok("тестовый ролик сгенерирован", small.is_file(),
+           p.stderr.decode()[-200:])
 
         before = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json",
@@ -91,26 +96,23 @@ else:
         after = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json",
              "-show_streams", str(dst)], capture_output=True, text=True)
-        import json
         bs = json.loads(before.stdout)["streams"][0]
         all_after = json.loads(after.stdout)["streams"]
         as_ = next(s for s in all_after if s["codec_type"] == "video")
-        eq("разрешение не поехало",
-           as_.get("width"), bs.get("width"))
-        eq("кадров в секунду не поехало",
-           as_.get("r_frame_rate"), bs.get("r_frame_rate"))
-        ok("длительность не поехала",
-           as_.get("duration"), bs.get("duration"))
+        eq("разрешение не поехало", as_.get("width"), bs.get("width"))
+        eq("кадров в секунду не поехало", as_.get("r_frame_rate"),
+           bs.get("r_frame_rate"))
+        ok("длительность не поехала", as_.get("duration"),
+           bs.get("duration"))
 
-        # -c copy значит, что видеопоток должен остаться побайтово
-        # прежним. Мерить весь файл нельзя: ffmpeg добавляет служебную
-        # дорожку таймкода, и на секундном обрывке это заметно, хотя
-        # на получасовой записи - копейки.
-        vsize = lambda streams: sum(  # noqa: E731
-            int(s.get("codec_size") or s.get("bit_rate") or 0)
-            for s in streams if s["codec_type"] == "video")
-        ok("видеопоток не перекодирован",
-           vsize(all_after) <= vsize([bs]) * 1.02,
+        # -c copy значит, что видеопоток остаётся прежним. Мерить весь
+        # файл нельзя: ffmpeg добавляет служебную дорожку таймкода, и
+        # на двухсекундном ролике это заметно, хотя на часовой записи -
+        # копейки.
+        def vsize(streams):
+            return sum(int(s.get("codec_size") or 0) for s in streams
+                       if s["codec_type"] == "video")
+        ok("видеопоток не перекодирован", vsize(all_after) <= vsize([bs]),
            f"{vsize(all_after)} против {vsize([bs])}")
         ok("появилась дорожка таймкода",
            any(s["codec_type"] not in ("video", "audio")

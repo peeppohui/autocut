@@ -6,6 +6,7 @@
 шаг в цепочке сборки: такое не падает, а тихо делает не то.
 """
 import sys
+import tempfile
 from pathlib import Path as _P
 
 sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src"))
@@ -27,6 +28,13 @@ def ok(name, cond, detail=""):
 
 captured = []
 A.App.go = lambda self, steps, result_dir: captured.append(steps)
+
+# Кнопки, которым не хватает пути, показывают модальное окно. В тесте
+# оно остановит прогон навсегда - подменяем заглушкой, которая
+# просто запоминает, что окно было.
+warned = []
+A.messagebox.showwarning = lambda *a, **k: warned.append(a[-1])
+A.messagebox.showinfo = lambda *a, **k: None
 
 app = A.App()
 app.update_idletasks()
@@ -60,11 +68,12 @@ def fill_and_press(page_name, label, values=()):
     return False
 
 
-# папка из реального прогона: кнопки проверяют существование пути,
-# поэтому подставлять нужно настоящее имя - «монтажи», не «монтаж»
-FAKE = "E:\\монтажи\\1. пробник интервью кати+богдан(нейро)"
-if not _P(FAKE).exists():          # проект переехал - тест не должен падать
-    FAKE = str(_P.home())
+# Кнопки проверяют существование пути, поэтому подставляем то, что
+# заведомо есть у любого: настоящий временный файл. Чужой путь с
+# ноутбука автора в тесте означал бы, что у другого машины он не пройдёт.
+FAKE = _P(tempfile.mkdtemp()) / "interview.mp4"
+FAKE.write_bytes(b"\0" * 16)
+FAKE_DIR = str(FAKE.parent)
 
 # --- все страницы собираются и не пустые ---
 # число берём из GROUPS, а не пишем константой: добавили «Мультикам» -
@@ -93,7 +102,7 @@ ok("состояние запуска отдельно", isinstance(app.run_stat
 
 # --- цепочки шагов те же, что до переезда ---
 ok("дайджест: кнопка отправила шаги",
-   fill_and_press("Дайджест", "Собрать рыбу", [FAKE]) and bool(captured))
+   fill_and_press("Дайджест", "Собрать рыбу", [FAKE_DIR]) and bool(captured))
 d = [t for t, _ in captured[-1]]
 ok("дайджест: шаги по порядку",
    d == ["1. Определяю планы", "2. Раскладываю по склейкам",
@@ -102,17 +111,17 @@ argv = dict(captured[-1])["2. Раскладываю по склейкам"]
 ok("дайджест: режим digest на месте", "--mode" in argv
    and "digest" in argv, str(argv[:6]))
 
-fill_and_press("Интервью 1 видео", "Собрать рыбу",
-               [FAKE + r"\synced\ref.mp4"])
+fill_and_press("Интервью 1 видео", "Собрать рыбу", [str(FAKE)])
 one = [t for t, _ in captured[-1]]
 ok("одно видео: шаги по порядку",
    one == ["1. Рыба по тексту", "2. XML для Premiere", "3. Субтитры"],
    str(one))
 
-# без файлов кнопка обязана просить, а не падать
+# без файлов кнопка обязана просить, а не падать и не вешать тест
 before = len(captured)
 fill_and_press("Интервью 1 видео", "Собрать рыбу")
 ok("без исходника шаги не запускаются", len(captured) == before)
+ok("и пользователю сказано, чего не хватает", bool(warned), str(warned))
 
 app.destroy()
 print()
