@@ -29,11 +29,20 @@ sys.path.insert(0, str(SRC / "config"))
 import settings                              # noqa: E402
 
 
-def premiere_args(timeline, project, stacked=False, music=None):
-    """Аргументы сборки XML для Premiere."""
+def premiere_args(timeline, project, stacked=False, music=None,
+                  width=None, height=None):
+    """Аргументы сборки XML для Premiere.
+
+    width/height нужны вертикали: медиа уже 1080x1920, и если секвенция
+    объявлена 1920x1080, Premiere покажет ролик в чёрных полях.
+    """
     p = Path(project)
     argv = [str(IO / "premiere.py"), "--timeline", str(timeline),
             "--media-dir", str(p), "--out", str(p / "ryba.xml")]
+    if width:
+        argv += ["--width", str(width)]
+    if height:
+        argv += ["--height", str(height)]
     if bool(settings.get("export.write_edl", True)):
         argv += ["--edl", str(p / "ryba.edl")]
     if bool(settings.get("export.trim_to_plan", True)):
@@ -43,6 +52,14 @@ def premiere_args(timeline, project, stacked=False, music=None):
     if music:
         argv += ["--music", str(music)]
     return argv
+
+
+def vertical_args(selects, project, width=1080, height=1920, speed=1.0):
+    """Аргументы перевода раскладки в вертикаль."""
+    return [str(ML / "vertical.py"), "--selects", str(selects),
+            "--outdir", str(Path(project) / "vertical"),
+            "--width", str(width), "--height", str(height),
+            "--speed", str(speed)]
 
 
 def srt_args(timeline, project):

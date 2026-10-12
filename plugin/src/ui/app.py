@@ -350,7 +350,14 @@ def page_multi(parent, app):
     only_tx = T.switch(opt, 3, "Сначала только транскрипт",
                        ctk.BooleanVar(value=False),
                        "правлю текст вручную, потом жму вторую кнопку")
-    dev = T.device_row(opt, 5)
+    vertical = T.switch(opt, 5, "Вертикаль 9:16 для Reels и Shorts",
+                        ctk.BooleanVar(value=False),
+                        "кадр перерезается по центру и встаёт в 1080x1920. "
+                        "Перекодируются только куски монтажа, не исходники")
+    vspeed = ctk.StringVar(value="1.0")
+    T.field(opt, 6, "Скорость", vspeed,
+            "1.5 — в полтора раза быстрее, 1.0 — как есть")
+    dev = T.device_row(opt, 7)
 
     dst = T.card(wrap, "Результат")
     out = T.field(dst, 0, "Папка проекта", ctk.StringVar(),
@@ -364,6 +371,25 @@ def page_multi(parent, app):
     def tgt_args():
         v = tgt.get().strip()
         return ["--target", v] if v else []
+
+    def export_args(o, timeline=None):
+        """Шаги экспорта. Вертикаль вклинивается перед Premiere.
+
+        Пока горизонтально - ровно то, что уже проверено импортом.
+        """
+        tl = timeline or f"{o}/rz/selects.csv"
+        steps = []
+        if vertical.get():
+            steps.append(("Вертикаль 9:16",
+                          _steps.vertical_args(tl, o,
+                                               speed=float(
+                                                   vspeed.get() or 1.0))))
+            tl = f"{o}/vertical/selects.csv"
+            return steps + [("XML для Premiere",
+                             premiere_args(tl, o, two_cam.get(),
+                                           width=1080, height=1920))], tl
+        return steps + [("XML для Premiere",
+                         premiere_args(tl, o, two_cam.get()))], tl
 
     def run_from_tx():
         t = app.transcript_path.get().strip().strip('"')
@@ -379,9 +405,7 @@ def page_multi(parent, app):
             ("1. Сборка из правленого текста",
              [str(MODES / "interview.py"), "--wide", w, "--guest-cam", g,
               "--outdir", f"{o}/rz", "--from-transcript", t] + tgt_args()),
-            ("2. XML для Premiere",
-             premiere_args(f"{o}/rz/selects.csv", o, two_cam.get())),
-            ("3. Субтитры", srt_args(f"{o}/rz/selects.csv", o))], o)
+        ] + export_args(o)[0] + [("Субтитры", srt_args(f"{o}/rz/selects.csv", o))], o)
 
     def run():
         paths = {}
@@ -411,10 +435,8 @@ def page_multi(parent, app):
              + tgt_args() + step2),
         ]
         if not only_tx.get():
-            steps.append(
-                ("3. XML для Premiere",
-                 premiere_args(f"{o}/rz/selects.csv", o, two_cam.get())))
-            steps.append(("4. Субтитры",
+            steps.extend(export_args(o)[0])
+            steps.append(("Субтитры",
                           srt_args(f"{o}/rz/selects.csv", o)))
         else:
             app.log("Режим транскрипта: после шага 2 вычеркни мусор в "
