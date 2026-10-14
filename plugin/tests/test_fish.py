@@ -160,4 +160,42 @@ s_silent = autocut.total_score(silent)
 s_spoken = autocut.total_score(spoken)
 assert s_silent != s_spoken, (s_silent, s_spoken)
 print("T13 текст влияет на цель оптимизатора OK")
+
+# 11. интервью не режется на продолжении мысли
+# Порядок реплик менять нельзя, а место склейки - можно. Кусок, который
+# начинается с «то есть», зритель иначе услышит с середины фразы.
+import interview  # noqa: E402
+
+merged, n = interview.merge_continuations(
+    [(0.0, 3.0, "гость", "аренда жилья дорожает каждый год"),
+     (3.2, 6.0, "гость", "то есть в среднем сорок тысяч в месяц")], 0.8)
+assert n == 1 and len(merged) == 1, (n, merged)
+assert merged[0][1] == 6.0, merged
+assert "то есть" in merged[0][3], merged
+print("T14 продолжение мысли склеено OK")
+
+kept, n = interview.merge_continuations(
+    [(0.0, 3.0, "гость", "аренда жилья дорожает"),
+     (3.2, 6.0, "гость", "в городе открылась новая выставка")], 0.8)
+assert n == 0 and len(kept) == 2, (n, kept)
+print("T15 самостоятельный кусок не тронут OK")
+
+# другой говорящий — резать нельзя, это смена голоса
+notmerged, n = interview.merge_continuations(
+    [(0.0, 3.0, "гость", "аренда жилья дорожает"),
+     (3.2, 6.0, "ведущий", "то есть в среднем сорок тысяч")], 0.8)
+assert n == 0 and len(notmerged) == 2, (n, notmerged)
+print("T16 смена говорящего не склеена OK")
+
+# большая пауза — там была смена мысли, тянуть через тишину нельзя
+biggap, n = interview.merge_continuations(
+    [(0.0, 3.0, "гость", "аренда жилья дорожает"),
+     (30.0, 33.0, "гость", "то есть в среднем сорок тысяч")], 0.8)
+assert n == 0 and len(biggap) == 2, (n, biggap)
+print("T17 через длинную паузу не тянем OK")
+
+assert interview.merge_continuations([], 0.8)[0] == []
+assert interview.merge_continuations([(0.0, 2.0, "гость", "текст")],
+                                     0.8)[1] == 0
+print("T18 пустые случаи не падают OK")
 print("ALL UNIT OK")

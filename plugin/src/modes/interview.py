@@ -48,6 +48,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
 import settings
+
+import narrative
 import blackframes
 
 try:
@@ -275,6 +277,48 @@ def group_utterances(words_g: List[Word], words_h: List[Word],
     return dropped, ambiguous
 
 
+def merge_continuations(chunks, merge_gap: float = 0.0,
+                        max_grow: float = 3.0):
+    """Не режет там, где следующий кусок не может стоять сам по себе.
+
+    Порядок реплик в интервью менять нельзя: это разговор, и перестановка
+    ответов ломает смысл. Но место склейки выбирать можно, и оно выбирается
+    не только по паузе.
+
+    Если кусок начинается с «то есть», «итак», «именно» или с указания без
+    предмета («это», «он»), он рассчитан на то, что предыдущее уже сказано.
+    Отдельным куском зритель услышит фразу с середины: «то есть» от чего -
+    непонятно. Поэтому такой кусок приклеивается к предыдущему тому же
+    говорящему.
+
+    Склейку разрешаем только если пауза невелика. Большая пауза означила
+    здесь смену мысли, и тянуть через неё монолог нельзя: в монтаж едет
+    тишина.
+
+    Возвращает (куски, сколько склеено).
+    """
+    if not chunks or not narrative.enabled():
+        return chunks, 0
+    idx = narrative.Index([c[3] for c in chunks])
+    out = [chunks[0]]
+    joined = 0
+    med = sorted(c[1] - c[0] for c in chunks)[len(chunks) // 2]
+    ceiling = max(med * max_grow, 12.0)
+    for c in chunks[1:]:
+        prev = out[-1]
+        gap = c[0] - prev[1]
+        opens_continuation = (narrative.has_continuative(c[3])
+                              or narrative.anaphora_share(c[3]) > 0.10)
+        if (opens_continuation and prev[2] == c[2]
+                and gap <= merge_gap
+                and (c[1] - prev[0]) <= ceiling):
+            out[-1] = (prev[0], c[1], prev[2], f"{prev[3]} {c[3]}".strip())
+            joined += 1
+        else:
+            out.append(c)
+    return out, joined
+
+
 def build_multicam_chunks(words_g: List[Word], words_h: List[Word],
                           merge_gap: float, max_pause: float,
                           min_keep: float):
@@ -301,6 +345,12 @@ def build_multicam_chunks(words_g: List[Word], words_h: List[Word],
             cur[1] = e
     if cur is not None and cur[1] - cur[0] >= min_keep and not _close_lone(cur[3]):
         chunks.append((cur[0], cur[1], cur[2], chunk_text(cur[3])))
+    # куски, которые начинаются с продолжения мысли, клеим к предыдущим.
+    # Это уже после цикла: внутри он дёргался бы на каждом слове.
+    chunks, joined = merge_continuations(chunks, merge_gap)
+    if joined:
+        print(f"  {joined} кусков не резал на продолжении мысли "
+              f"(«то есть», «итак», указание без предмета).")
     return chunks, cut_pauses
 
 
