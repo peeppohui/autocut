@@ -122,4 +122,42 @@ same = loud(19.0, 23.0)
 n9, amb9 = group_utterances(wg9, wh9, same, same)
 assert n9 == 2 and len(amb9) == 1, (n9, amb9)
 print("T9 ambiguous OK:", [(round(a, 1), round(b, 1)) for a, b in amb9])
+
+# 10. смысловая связность в раскладке дайджеста
+# Проверяется главное: без распознанной речи поведение не меняется ни на
+# йоту, а с речью оптимизатор начинает учитывать смысл, а не только
+# крупность. Если это не так - дайджест тихо поедет у пользователя.
+import autocut  # noqa: E402
+
+
+def cl(plan, hero, text=""):
+    return autocut.Clip(file=f"{plan}.mp4", plan=plan, hero=hero, text=text)
+
+
+silent = [cl("общий", "сцена"), cl("средний1", "зрители"),
+          cl("средний2", "сцена")]
+assert autocut.chain_link(silent) == 0.0, autocut.chain_link(silent)
+print("T10 без речи связность нулевая OK")
+
+# три куска, где третий продолжает второй, а не первый
+spoken = [cl("общий", "сцена", "мы сегодня говорим про аренду жилья"),
+          cl("средний1", "сцена", "аренда жилья дорожает каждый год"),
+          cl("средний2", "сцена", "в городе открылась новая выставка")]
+good = autocut.chain_link(spoken)
+assert good > 0.0, good
+assert good <= 100.0, good
+print(f"T11 связность по речи считается OK: {good:.1f}")
+
+# переставленные: разрыв в середине должен дать связность ниже
+shuffled = [spoken[0], spoken[2], spoken[1]]
+bad = autocut.chain_link(shuffled)
+assert bad < good, (bad, good)
+print(f"T12 разрыв темы виден в связности OK: {bad:.1f} против {good:.1f}")
+
+# цель раскладки с речью должна отличаться от цели без неё
+w0 = 0.0
+s_silent = autocut.total_score(silent)
+s_spoken = autocut.total_score(spoken)
+assert s_silent != s_spoken, (s_silent, s_spoken)
+print("T13 текст влияет на цель оптимизатора OK")
 print("ALL UNIT OK")

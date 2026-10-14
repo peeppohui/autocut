@@ -37,6 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
 import settings
 
+import narrative
+
 try:
     # чтобы русский текст не падал на Windows-консоли (cp1251)
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -113,6 +115,10 @@ class Clip:
     hero: str = "герой"  # кто/что в кадре. Одинаковый hero = один объект -> строгое правило
     duration: float = 3.0
     desc: str = ""
+    # Речь, если куски прогонялись через распознавание. Пусто - а
+    # значит работаем только по картинке, и это нормальный режим:
+    # распознавать папку видео дорого, а дайджестам текст часто не нужен.
+    text: str = ""
 
     @property
     def size(self) -> int:
@@ -259,6 +265,66 @@ def validate_sequence(clips: List[Clip], mode: str = "digest") -> Dict:
 
 # ------------------------------------------------------- авто-раскладка
 
+def chain_link(order: List[Clip]) -> float:
+    """Насколько куски связаны по смыслу, 0..100.
+
+    Считается только когда есть текст. Без распознавания речи дайджест
+    работает ровно как раньше: единственное, что известно о куске, это
+    его план и герой, а по ним смысловую связность не вывести.
+    """
+    if len(order) < 2 or not any(c.text for c in order):
+        return 0.0
+    idx = narrative.Index([c.text or c.desc for c in order])
+    vals = []
+    for i in range(len(order) - 1):
+        if not (order[i].text and order[i + 1].text):
+            continue
+        vals.append(narrative.link_score(order[i].text, order[i + 1].text, idx).score)
+    if not vals:
+        return 0.0
+    return 100.0 * sum(vals) / len(vals)
+
+
+def transcribe_clips(clips: List[Clip], folder: Path,
+                     model_name: str = "", device: str = "auto") -> int:
+    """Заполняет Clip.text речью из кусков. Возвращает число распознанных.
+
+    Отдельный шаг и отдельный флаг не из лени: распознавание папки видео
+    на два часа занимает минуты, а большая часть дайджестов собирается
+    вообще без единого слова. Кто не просил - тот не платит временем.
+    """
+    import interview
+    model_name = model_name or str(settings.get("interview.model", "base"))
+    try:
+        model, dev = interview.make_model(model_name, device)
+    except Exception as e:
+        print(f"Распознавание пропущено: {str(e)[:140]}")
+        return 0
+    print(f"Распознаю речь в {len(clips)} кусках ({model_name}, {dev})...")
+    done = 0
+    for c in clips:
+        p = Path(folder) / c.file
+        if not p.is_file():
+            continue
+        wav = Path(folder) / f"._sp_{done}.wav"
+        try:
+            interview.extract_wav(p, wav)
+            audio = interview.load_mono16(wav)
+            _words, segs = interview.transcribe_audio_array(audio, model, c.file)
+            c.text = " ".join((s.get("text") or "").strip() for s in segs).strip()
+            if c.text:
+                done += 1
+                print(f"  {c.file}: {c.text[:70]}")
+            else:
+                print(f"  {c.file}: речи не найдено")
+        except Exception as e:
+            print(f"  {c.file}: не разобрано ({str(e)[:80]})")
+        finally:
+            wav.unlink(missing_ok=True)
+    print(f"Распознано кусков с речью: {done} из {len(clips)}")
+    return done
+
+
 def total_score(order: List[Clip]) -> float:
     if len(order) < 2:
         return 100.0
@@ -266,7 +332,12 @@ def total_score(order: List[Clip]) -> float:
     # бонус за старт с общего в дайджесте
     if order and order[0].plan in ("общий", "дальний"):
         s += 5
-    return s / (len(order) - 1)
+    base = s / (len(order) - 1)
+    # смысловая связность. Без текста она равна нулю и ничего не портит.
+    w = float(settings.get("narrative.chain_weight", 0.0))
+    if w and narrative.enabled():
+        base += w * chain_link(order)
+    return base
 
 
 def suggest_order(clips: List[Clip], mode: str = "digest", seed: int = None) -> List[Clip]:
@@ -480,6 +551,10 @@ def main(argv=None):
     ap.add_argument("--finale-wide", action="store_true",
                     default=bool(settings.get("digest.digest_finale_wide", True)),
                     help="шаблон дайджеста: финал обязательно общим/дальним")
+    ap.add_argument("--transcribe", action="store_true",
+                    help="распознать речь в кусках, чтобы выстраивать цепочку "
+                         "по смыслу. Дорого: минуты на папку видео")
+    ap.add_argument("--device", default="auto")
     args = ap.parse_args(argv)
 
     if args.demo:
@@ -495,6 +570,16 @@ def main(argv=None):
         print("\nПример: python plugin/src/modes/autocut.py --demo digest --auto")
         print("       python plugin/src/modes/autocut.py --csv clips.csv --mode digest --auto --out timeline.csv")
         return 0
+
+    # Речь нужна только для смысловой связности. Без флага куски остаются
+    # без текста, и раскладка считается ровно как раньше - только по
+    # крупности. Это не «ухудшенный режим», а обычный.
+    if args.transcribe and narrative.enabled():
+        folder = Path(args.csv).parent if args.csv else Path(".")
+        if not transcribe_clips(clips, folder, device=args.device):
+            print("  Текста не распозналось - цепочка будет строиться по картинке.")
+    elif args.transcribe:
+        print("Повествование выключено в настройках, распознавание пропущено.")
 
     if args.auto or args.demo:
         ordered = suggest_order(clips, mode=mode)
@@ -513,6 +598,12 @@ def main(argv=None):
         # fix может дублировать деталь — убираем дубли по file, если деталь уже использована дважды
         report = validate_sequence(fixed, mode=mode)
         print_report(fixed, report, notes)
+        if any(c.text for c in fixed):
+            link = chain_link(fixed)
+            print(f"\nСмысловая связность цепочки: {link:.0f} из 100")
+            if link < 25:
+                print("  Связность низкая: куски почти не продолжают друг "
+                      "друга. Возможно, материал разнородный.")
     else:
         report = validate_sequence(clips, mode=mode)
         print_report(clips, report)

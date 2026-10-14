@@ -267,11 +267,16 @@ def link_score(a_text: str, b_text: str, idx: Index) -> Link:
     ana = min(1.0, anaphora_share(b_text) * 6.0)
 
     w_lex = float(settings.get("narrative.w_lexical", 1.0))
-    w_mark = float(settings.get("narrative.w_marker", 0.45))
-    w_ana = float(settings.get("narrative.w_anaphora", 0.25))
-    raw = w_lex * lex + w_mark * marker + w_ana * ana
-    # нормируем на максимум, который возможен при всех трёх сразу
-    score = max(0.0, min(1.0, raw / (w_lex + w_mark + w_ana)))
+    w_mark = float(settings.get("narrative.w_marker", 0.35))
+    w_ana = float(settings.get("narrative.w_anaphora", 0.20))
+    # Нормируем на полную шкалу, а не на сумму весов. Деление на сумму
+    # означало бы, что идеальное совпадение по теме даёт 1/1.7 и никогда
+    # не доходит до единицы: масштаб 0..1 перестаёт соответствовать
+    # смыслу шкалы, и любой порог в настройках ведёт себя неожиданно.
+    # Пересечение по теме занимает всю шкалу само по себе, а связка и
+    # указания работают как надбавка - ими спасаются случаи, где
+    # пересечения нет вовсе, но кусок явно продолжает предыдущий.
+    score = max(0.0, min(1.0, lex + w_mark * marker + w_ana * ana))
 
     parts = []
     if lex > 0.12:
