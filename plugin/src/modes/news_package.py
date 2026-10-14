@@ -38,12 +38,14 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
 import settings
+
+import narrative  # src/modes — рядом, поэтому через bootstrap
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -185,6 +187,50 @@ def split_range(start: float, end: float, min_len: float, max_len: float) -> Lis
 
 # --------------------------------------------------------------- план
 
+def role_rank(role: str, want: Tuple[str, ...]) -> float:
+    """Насколько роль куска подходит под требуемую.
+
+    Точное совпадение - 1.0, родственная роль - 0.5, не подходит - 0.
+    Родство нужно, потому что в живой речи один кусок честно может
+    быть и тезисом, и примером: заставлять его подгоняться под одну
+    роль значит половину материала отбрасывать.
+    """
+    if role in want:
+        return 1.0
+    near = {
+        "крючок": ("тезис", "контекст"),
+        "вывод": ("тезис", "контекст"),
+        "тезис": ("пример", "контекст", "вывод"),
+        "пример": ("тезис",),
+        "контекст": ("тезис", "крючок"),
+        "возражение": ("тезис", "пример"),
+    }
+    for w in want:
+        if role in near.get(w, ()):
+            return 0.5
+    return 0.0
+
+
+def pick_for_role(segs: List[Dict], cfg: Dict,
+                  want: Tuple[str, ...]) -> Optional[Dict]:
+    """Кусок под роль: сначала подходит роль, и только потом старая оценка.
+
+    Раньше все блоки выбирались одной оценкой score_segment - цифра,
+    эмоция, длина. Из-за этого в лид мог попасть кусок с цифрами, но
+    без вопроса и без конфликта: формально сильный, зрителю не за что
+    зацепиться. Роль смотрит на другое - на то, для чего кусок годится.
+    """
+    if not segs:
+        return None
+    best, best_key = None, (-1.0, -1.0, -1)
+    for i, s in enumerate(segs):
+        r = narrative.classify_role(s.get("text", ""))
+        key = (role_rank(r.role, want), score_segment(s, cfg), -i)
+        if key > best_key:
+            best_key, best = key, s
+    return best
+
+
 def build_storyboard(spec: Dict, cfg: Dict) -> Dict:
     """Собирает расклад: список блоков хронометража.
 
@@ -208,17 +254,21 @@ def build_storyboard(spec: Dict, cfg: Dict) -> Dict:
         if not segs:
             continue
         cut = trim_lead_fillers(segs, cfg["lead_fillers"], cfg["lead_trim_max_sec"])
-        best = max(segs, key=lambda x: score_segment(x, cfg))
+        # лиду нужна роль крючка, а не просто «самый громкий» кусок.
+        # trim_lead_fillers возвращает только секунды, куски остаются segs.
+        best = pick_for_role(segs, cfg, ("крючок", "тезис", "контекст")) or segs[0]
         entry = dict(s)
         entry["_segs"] = segs
         entry["_cut"] = cut
         entry["_score"] = score_segment(best, cfg)
+        entry["_role"] = narrative.classify_role(best.get("text", "")).role
         entry["_best"] = best
         scored.append(entry)
     if not scored:
         raise ValueError("Ни в одном синхроне не нашлось транскрипта с текстом")
 
-    scored.sort(key=lambda x: x["_score"], reverse=True)
+    scored.sort(key=lambda x: (role_rank(x["_role"], ("крючок", "тезис")),
+                            x["_score"]), reverse=True)
     lead = scored[0]
     rest = scored[1:]
 
@@ -332,7 +382,8 @@ def build_storyboard(spec: Dict, cfg: Dict) -> Dict:
               "лид: самый сильный синхрон, начало подчищено от «ну/вот/ээ»",
               lead["_best"].get("text", ""))
     plan["notes"].append(
-        f"Лид взят из синхрона «{lead.get('speaker', '?')}», оценка {lead['_score']:.1f}. "
+        f"Лид взят из синхрона «{lead.get('speaker', '?')}», оценка "
+        f"{lead['_score']:.1f}, роль «{lead['_role']}». "
         f"Срезано в начале: {lead['_cut']:.2f} с")
 
     # --- 2. СУТЬ СОБЫТИЯ: закадр + перебивки ---
@@ -353,13 +404,26 @@ def build_storyboard(spec: Dict, cfg: Dict) -> Dict:
     chosen = rest[: max(0, int(cfg["syncs_count"]) - 1)]
     if not chosen and len(scored) > 1:
         chosen = [scored[1]] if len(scored) > 1 else []
-    for sync in chosen:
+    # Каждому синхрону - своя роль в блоке. Раньше все отбирались одной
+    # оценкой, и три сильных куска подряд читались как одно и то же.
+    # Теперь блок последовательно раскрывает тему: утверждение, пример,
+    # спор, контекст.
+    want_for_sync = (("тезис", "контекст"), ("пример", "тезис"),
+                     ("возражение", "пример"), ("контекст", "тезис"))
+    for si, sync in enumerate(chosen):
+        want = want_for_sync[si % len(want_for_sync)]
         segs = [s for s in sync["_segs"]
                 if _quote_key(sync, s) not in used_quotes]
         # берём лучшие куски реплики, пока не наберём нужный хронометраж
         got = 0.0
         budget = blocks_cfg["syncs_sec"] / max(1, len(chosen))
-        for seg in sorted(segs, key=lambda x: score_segment(x, cfg), reverse=True):
+        ranked = sorted(
+            segs,
+            key=lambda x: (role_rank(
+                narrative.classify_role(x.get("text", "")).role, want),
+                score_segment(x, cfg)),
+            reverse=True)
+        for seg in ranked:
             if got >= budget:
                 break
             a, b = seg["start"] + sync["_cut"], seg["end"]
@@ -395,7 +459,8 @@ def build_storyboard(spec: Dict, cfg: Dict) -> Dict:
     if standup.get("media") and standup.get("transcript"):
         st_segs = load_transcript(Path(standup["transcript"]))
         if st_segs:
-            best = max(st_segs, key=lambda x: score_segment(x, cfg))
+            # финалу нужна роль вывода, а не самый звонкий кусок
+            best = pick_for_role(st_segs, cfg, ("вывод", "тезис")) or st_segs[0]
             cut = trim_lead_fillers(st_segs, cfg["lead_fillers"], cfg["lead_trim_max_sec"])
             a = best["start"] + cut
             b = min(best["end"], a + blocks_cfg["ending_sec"])
