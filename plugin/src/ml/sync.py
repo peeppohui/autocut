@@ -190,9 +190,24 @@ def find_offset(ref_env, other_env, rate: float = 50.0, max_lag: float = None):
     win = int(REFINE_WINDOW_SEC * rate)
     lags_f = np.arange(int(lag_c * step) - win, int(lag_c * step) + win + 1)
     lags_f = lags_f[np.abs(lags_f) <= max_lag * rate]
+    if len(lags_f) == 0:
+        # окно уточнения вышло за пределы поиска: голосование указывало
+        # на самый край, а уточнять вокруг него нечего. Раньше здесь
+        # был np.argmin от пустого массива и программа падала целиком -
+        # то есть на материале с редкими сдвигами синхронизация не
+        # запускалась вовсе.
+        return 0.0, 0.0, 0.0
     cf = _wcorr(ref_env, other_env, lags_f)
     cands = np.where(cf >= 0.99 * cf.max())[0]
-    bj = cands[np.abs(lags_f[cands]).argmin()]
+    if len(cands) == 0:
+        # пик есть, но ни один кандидат не дотянул до порога: считаем,
+        # что надёжной находки нет
+        return 0.0, 0.0, 0.0
+    # Берём самый сильный из кандидатов, а не ближайший к нулю. С
+    # широким окном появляются ложные пики на краю поиска, и правило
+    # «ближе к нулю - значит правильнее» их пропускало: настоящий сдвиг
+    # и артефакт оказывались в равном положении, и выигрывал артефакт.
+    bj = int(cands[int(cf[cands].argmax())])
     lag, peak = lags_f[bj], cf[bj]
     denom = float(np.sqrt(((ref_env - ref_env.mean()) ** 2).sum() *
                           ((other_env - other_env.mean()) ** 2).sum()) + 1e-9)

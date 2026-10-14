@@ -239,9 +239,17 @@ class Link:
         return self.reason
 
 
-def has_continuative(text: str) -> bool:
+def has_continuative(text: str, head_chars: int = 45) -> bool:
+    """Начинается ли кусок со связки, ссылающейся на предыдущее.
+
+    Смотрим только самое начало, а не первые полторы строки. Иначе
+    «кстати», сказанное в середине фразы, считалось бы началом
+    продолжения, и монтаж склеивал бы куски на пустом месте. На живом
+    интервью это давало ложную склейку: кусок начинался с «я хотел бы у
+    тебя спросить», а «кстати» стояло через сто символов.
+    """
     low = " " + (text or "").lower().replace("ё", "e").strip() + " "
-    head = low[:140]
+    head = low[:head_chars + 2]
     return any(m in head for m in CONTINUATIVES)
 
 

@@ -246,7 +246,13 @@ def group_utterances(words_g: List[Word], words_h: List[Word],
     и у ведущего): границы слов у двух транскриптов разные, и каждое
     слово «выигрывал» свой микрофон."""
     events = sorted([(w.start, w.end, "г", w) for w in words_g if not w.drop] +
-                    [(w.start, w.end, "в", w) for w in words_h if not w.drop])
+                    [(w.start, w.end, "в", w) for w in words_h if not w.drop],
+                    # ключ обязателен: когда два слова начинаются и
+                    # кончаются в одну секунду, sorted() пытается
+                    # сравнить сами объекты Word и падает. На живом
+                    # интервью такие совпадения регулярны - два
+                    # микрофона ловят одно и то же слово одновременно.
+                    key=lambda e: (e[0], e[1]))
     groups = []  # [t0, t1, [w_g], [w_h]]
     for s, e, sp, w in events:
         if groups and s - groups[-1][1] <= link_gap:
@@ -277,8 +283,8 @@ def group_utterances(words_g: List[Word], words_h: List[Word],
     return dropped, ambiguous
 
 
-def merge_continuations(chunks, merge_gap: float = 0.0,
-                        max_grow: float = 3.0):
+def merge_continuations(chunks, max_join_gap: float = 0.0,
+                        max_join_sec: float = 0.0):
     """Не режет там, где следующий кусок не может стоять сам по себе.
 
     Порядок реплик в интервью менять нельзя: это разговор, и перестановка
@@ -291,27 +297,36 @@ def merge_continuations(chunks, merge_gap: float = 0.0,
     непонятно. Поэтому такой кусок приклеивается к предыдущему тому же
     говорящему.
 
-    Склейку разрешаем только если пауза невелика. Большая пауза означила
-    здесь смену мысли, и тянуть через неё монолог нельзя: в монтаж едет
-    тишина.
+    Про два порога. Раньше здесь стояло «пауза не больше merge_gap», и
+    условие было невыполнимо: куски делятся как раз тогда, когда пауза
+    больше merge_gap, то есть склеивать было нечего, и на живом интервью
+    не сработало ни разу. Теперь сверху пауза, которую склеивать можно:
+    это обычная пауза между фразами, полторы-две секунды.
+
+    Второй порог - длина получившегося куска. Изначально он был «втрое
+    больше медианы», и это отсекал всё живое: медиана куска здесь 6.5с, и
+    монолог в 20с не влезал. Порог абсолютный: склеенный кусок длиннее
+    полуминуты уже не монолог, а пересказ, и его надо резать руками.
 
     Возвращает (куски, сколько склеено).
     """
     if not chunks or not narrative.enabled():
         return chunks, 0
+    max_join_gap = max_join_gap or float(
+        settings.get("interview.join_max_gap_sec", 1.5))
+    max_join_sec = max_join_sec or float(
+        settings.get("interview.join_max_sec", 30.0))
     idx = narrative.Index([c[3] for c in chunks])
     out = [chunks[0]]
     joined = 0
-    med = sorted(c[1] - c[0] for c in chunks)[len(chunks) // 2]
-    ceiling = max(med * max_grow, 12.0)
     for c in chunks[1:]:
         prev = out[-1]
         gap = c[0] - prev[1]
         opens_continuation = (narrative.has_continuative(c[3])
                               or narrative.anaphora_share(c[3]) > 0.10)
         if (opens_continuation and prev[2] == c[2]
-                and gap <= merge_gap
-                and (c[1] - prev[0]) <= ceiling):
+                and gap <= max_join_gap
+                and (c[1] - prev[0]) <= max_join_sec):
             out[-1] = (prev[0], c[1], prev[2], f"{prev[3]} {c[3]}".strip())
             joined += 1
         else:
@@ -325,7 +340,8 @@ def build_multicam_chunks(words_g: List[Word], words_h: List[Word],
     """Куски вида (in, out, speaker, text). Граница — всегда смена говорящего
     или пауза > merge_gap внутри одного."""
     events = sorted([(w.start, w.end, "гость", w) for w in words_g if not w.drop] +
-                    [(w.start, w.end, "ведущий", w) for w in words_h if not w.drop])
+                    [(w.start, w.end, "ведущий", w) for w in words_h if not w.drop],
+                    key=lambda e: (e[0], e[1]))
     chunks = []
     cut_pauses = 0.0
     cur = None  # [in, end, speaker, words]
@@ -347,10 +363,21 @@ def build_multicam_chunks(words_g: List[Word], words_h: List[Word],
         chunks.append((cur[0], cur[1], cur[2], chunk_text(cur[3])))
     # куски, которые начинаются с продолжения мысли, клеим к предыдущим.
     # Это уже после цикла: внутри он дёргался бы на каждом слове.
-    chunks, joined = merge_continuations(chunks, merge_gap)
+    chunks, joined = merge_continuations(chunks)
     if joined:
         print(f"  {joined} кусков не резал на продолжении мысли "
               f"(«то есть», «итак», указание без предмета).")
+    left = 0
+    for a, b in zip(chunks, chunks[1:]):
+        t = b[3]
+        if (b[2] == a[2] and b[0] - a[1] > float(
+                settings.get("interview.join_max_gap_sec", 1.5))
+                and (narrative.has_continuative(t)
+                     or narrative.anaphora_share(t) > 0.10)):
+            left += 1
+    if left:
+        print(f"  {left} кусков осталось с началом с середины мысли: пауза "
+              f"слишком длинная, склеивать нельзя - глянь в transcript.")
     return chunks, cut_pauses
 
 
@@ -492,11 +519,18 @@ def build_keeps(words: List[Word], max_pause: float, merge_gap: float,
 
 def write_numbered_transcript(path: Path, chunks) -> None:
     """Транскрипт, который можно править руками: строки с '-' в начале
-    будут выкинуты при сборке (--from-transcript)."""
+    будут выкинуты при сборке (--from-transcript).
+
+    Куски приходят то четвёрками (до выбора камеры), то пятёрками (после,
+    с выбранной камерой на конце). Раньше распаковка ждала ровно четыре
+    поля, и на живом интервью сборка падала на этом - то есть основной
+    путь двухкамерного режима не проходил вообще. Тестов на это не было.
+    """
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Режь прямо здесь: строки с '-' в начале НЕ войдут в рыбу.\n")
         f.write("# Формат не ломай: [N] [t0-t1] ГОСТЬ: текст\n")
-        for n, (i, o, sp, text) in enumerate(chunks, 1):
+        for n, row in enumerate(chunks, 1):
+            i, o, sp, text = row[0], row[1], row[2], row[3]
             tag = "ГОСТЬ" if sp == "гость" else "ВЕДУЩИЙ"
             f.write(f"[{n}] [{i:.2f}-{o:.2f}] {tag}: {text}\n")
 
