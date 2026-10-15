@@ -47,6 +47,14 @@ TRUST_CONTRAST = float(settings.get("sync.trust_contrast", 3.0))
 MIC_MISMATCH_QUALITY = float(settings.get("sync.mic_mismatch_quality", 0.2))
 MIC_MISMATCH_CONTRAST = float(settings.get("sync.mic_mismatch_contrast", 2.0))
 MIC_MISMATCH_TOLERANCE = float(settings.get("sync.mic_cross_check_tolerance_sec", 1.0))
+# В каком качестве писать МИКРОФОНЫ В РЕЗУЛЬТАТЕ. Это не то же самое, что
+# `to_mono16k`: для разбора огибающей 16 кГц моно хватает и даже полезно
+# (считать быстрее), но в папку synced кладётся исходная запись, приведённая
+# к качеству экспорта. Иначе в Premiere микрофон звучит как разговор по
+# телефону. Исходники лежат в 48 кГц, терять нечего.
+AUDIO_RATE = int(settings.get("export.audio_sample_rate", 48000))
+AUDIO_DEPTH = int(settings.get("export.audio_depth", 16))
+AUDIO_CODEC = "pcm_s16le" if AUDIO_DEPTH == 16 else "pcm_s24le"
 # Окно итераций и блоков в многосекундных единицах
 VOTE_BLOCK_SEC = float(settings.get("sync.vote_block_sec", 60))
 REFINE_WINDOW_SEC = float(settings.get("sync.refine_window_sec", 3))
@@ -241,21 +249,21 @@ def file_dur(path: Path) -> float:
 
 
 def pad_audio_to_zero(src_wav: Path, offset: float, dst: Path):
-    """Добиваем начало тишиной на offset (файл стартовал позже опоры)."""
-    if offset <= 0.01:
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src_wav),
-                        "-c:a", "pcm_s16le", str(dst)], check=True)
-        return
-    import numpy as np
-    x = read_wav(src_wav)
-    pad = np.zeros(int(offset * 16000), dtype=np.float32)
-    y = np.concatenate([pad, x])
-    import wave as wv
-    with wv.open(str(dst), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(16000)
-        wf.writeframes((np.clip(y, -1, 1) * 32767).astype(np.int16).tobytes())
+    """Добиваем начало тишиной на offset (файл стартовал позже опоры).
+
+    Тишину добавляет ffmpeg, а не numpy: раньше здесь был свой writer,
+    жёстко зашитый на 16000 Гц, моно и 16 бит, и дорожка в 48 кГц
+    проходила через него сменой формата по дороге. `adelay=...:all=1`
+    сдвигает все каналы одинаково и работает при любой частоте, а
+    приведение к частоте экспорта ffmpeg делает сам - пересэмплирование
+    у него качественнее, чем было бы перебросом int16 в int16.
+    """
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src_wav), "-vn",
+           "-ar", str(AUDIO_RATE)]
+    if offset > 0.01:
+        cmd += ["-af", f"adelay={int(round(offset * 1000))}:all=1"]
+    cmd += ["-c:a", AUDIO_CODEC, str(dst)]
+    subprocess.run(cmd, check=True)
 
 
 def vcodec_args():
@@ -651,7 +659,9 @@ def main(argv=None) -> int:
     print("Добиваю до общего нуля...")
     for name, p in jobs:
         if name.startswith("mic_"):
-            pad_audio_to_zero(tmp / f"{name}.wav", offsets[name], out / f"{name}.wav")
+            # Именно исходник `p`, а не промежуточный tmp/{name}.wav:
+            # тот ради разбора, этот идёт в результат.
+            pad_audio_to_zero(p, offsets[name], out / f"{name}.wav")
         else:
             pad_video_to_zero(p, offsets[name], out / f"{name}.mp4",
                               is_ref=(name == "ref"), conform=conform)

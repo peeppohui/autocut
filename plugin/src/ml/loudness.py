@@ -128,17 +128,20 @@ def measure(path: Path) -> Optional[Dict[str, float]]:
 
 
 def _probe(path: Path) -> Dict[str, int]:
+    """Частота, каналы и разрядность дорожки - чтобы их не менять."""
     proc = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
-         "-show_entries", "stream=channels,sample_rate", "-of", "json",
-         str(path)],
+         "-show_entries", "stream=channels,sample_rate,bits_per_raw_sample",
+         "-of", "json", str(path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     try:
         st = json.loads(proc.stdout)["streams"][0]
+        bits = int(st.get("bits_per_raw_sample") or 0)
         return {"channels": int(st.get("channels") or 1),
-                "rate": int(st.get("sample_rate") or 48000)}
+                "rate": int(st.get("sample_rate") or 48000),
+                "depth": 24 if bits >= 24 else 16}
     except Exception:
-        return {"channels": 1, "rate": 48000}
+        return {"channels": 1, "rate": 48000, "depth": 16}
 
 
 def normalize(src: Path, dst: Optional[Path] = None,
@@ -187,7 +190,8 @@ def normalize(src: Path, dst: Optional[Path] = None,
             ["ffmpeg", "-y", "-v", "error", "-i", str(src),
              "-af", chain_filter(gain, limit),
              "-ar", str(probe["rate"]), "-ac", str(probe["channels"]),
-             "-c:a", "pcm_s24le", str(out)],
+             "-c:a", "pcm_s24le" if probe["depth"] == 24 else "pcm_s16le",
+             str(out)],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace")
         if proc.returncode != 0:

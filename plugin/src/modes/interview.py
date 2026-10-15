@@ -151,10 +151,33 @@ def normalize_tracks(tracks: List[Path]) -> None:
 
 
 def extract_wav(video: Path, out: Path):
+    """Достаёт аудио для РАСПОЗНАВАНИЯ: 16 кГц моно.
+
+    Это штатный вход whisper, и тут понижение частоты полезно: считать
+    быстрее, а распознавателю всё равно нужен узкий диапазон. В рыбу
+    такую дорожку класть нельзя - в Premiere голос звучал бы как
+    разговор по телефону. Для сети монтажа есть `extract_audio_full`.
+    """
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-i", str(video),
          "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(out)],
         check=True)
+
+
+def extract_audio_full(video: Path, out: Path):
+    """Достаёт аудио для МОНТАЖА, в качестве, заданном экспортом.
+
+    Частота и разрядность берутся из config/settings.json, секция export,
+    а число каналов остаётся как в исходнике: микрофон физически один,
+    и размножение моно в стерео ничего не добавляет, только удваивает
+    файл. Premiere моно на стереодорожке играет без всяких правок.
+    """
+    rate = int(settings.get("export.audio_sample_rate", 48000))
+    depth = int(settings.get("export.audio_depth", 16))
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-vn",
+         "-ar", str(rate), "-c:a", "pcm_s16le" if depth == 16 else "pcm_s24le",
+         str(out)], check=True)
 
 
 def load_mono16(path: Path):
@@ -956,10 +979,11 @@ def run_from_transcript(args) -> int:
     if not chunks:
         print("В файле не осталось строк — нечего собирать.")
         return 1
-    gw, hw = out / "_guest.wav", out / "_host.wav"
+    gw, hw = out / "_guest_full.wav", out / "_host_full.wav"
     has_mics = gw.is_file() and hw.is_file()
     if not has_mics:
-        print("Микрофонов _guest/_host.wav нет — звук в A1 пойдёт с камер.")
+        print("Микрофонов _guest_full/_host_full.wav нет — звук в A1 "
+              "пойдёт с камер.")
     broll = load_broll(Path(args.broll)) if args.broll and Path(args.broll).is_file() else []
 
     CAMS = {"wide": (wide, args.wide_plan, "ведущий"),
@@ -1040,7 +1064,14 @@ def run_multicam(args) -> int:
     gw, hw = out / "_guest.wav", out / "_host.wav"
     extract_wav(gmic, gw)
     extract_wav(hmic, hw)
-    normalize_tracks([gw, hw])
+    # Дорожки для монтажа - отдельные файлы и в полном качестве.
+    # Одну и ту же дорожку нельзя держать в двух видах под одним именем:
+    # распознавание читает 16 кГц моно, а в selects.csv уходит ссылка
+    # на то, что реально ляжет на дорожку Premiere.
+    gwf, hwf = out / "_guest_full.wav", out / "_host_full.wav"
+    extract_audio_full(gmic, gwf)
+    extract_audio_full(hmic, hwf)
+    normalize_tracks([gwf, hwf])
     audio_g, audio_h = load_mono16(gw), load_mono16(hw)
     n = min(len(audio_g), len(audio_h))
     audio_g, audio_h = audio_g[:n], audio_h[:n]
@@ -1132,7 +1163,7 @@ def run_multicam(args) -> int:
         rows.append({"file": vf.name, "plan": vplan, "hero": vhero,
                      "duration": round(o - i, 2), "in": round(i, 2), "out": round(o, 2),
                      "desc": desc, "path": str(vf.absolute()),
-                     "audio": str(gw.absolute()) if sp == "гость" else str(hw.absolute()),
+                     "audio": str((gwf if sp == "гость" else hwf).absolute()),
                      "alt": avf.name, "alt_path": str(avf.absolute())})
         if k < len(chunks) - 1 and broll:
             b = broll[bi % len(broll)]
