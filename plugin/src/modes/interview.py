@@ -124,6 +124,32 @@ def norm(w: str) -> str:
     return re.sub(r"[^\w\-]", "", w.lower())
 
 
+def normalize_tracks(tracks: List[Path]) -> None:
+    """Выравнивает громкость микрофонов перед всей дальнейшей работой.
+
+    Нормировать надо ДО распознавания и до нарезки: в рыбу попадают
+    именно эти файлы, и дальше по цепочке громкость уже никто не
+    трогает. На живом интервью микрофоны расходились на 5.6 дБ, и
+    половина разговора была тише половины.
+
+    Каждая дорожка идёт к ОДНОЙ цели, и это важно: тогда выравнивание
+    баланса и общей громкости получается одним движением, а не двумя.
+    Отдельный проход «поднять тихого» сдвинул бы громкость только
+    относительно соседа и оставил бы весь ролик тихим.
+
+    Молча не справляемся: если дорожка не измерилась, сборка идёт
+    дальше как была. Нормализация улучшает звук, но не имеет права
+    срывать монтаж.
+    """
+    import loudness
+    if not loudness.enabled():
+        print("  нормализация выключена в настройках")
+        return
+    for path in tracks:
+        rep = loudness.normalize(Path(path))
+        print("  " + loudness.describe(rep))
+
+
 def extract_wav(video: Path, out: Path):
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-i", str(video),
@@ -1014,6 +1040,7 @@ def run_multicam(args) -> int:
     gw, hw = out / "_guest.wav", out / "_host.wav"
     extract_wav(gmic, gw)
     extract_wav(hmic, hw)
+    normalize_tracks([gw, hw])
     audio_g, audio_h = load_mono16(gw), load_mono16(hw)
     n = min(len(audio_g), len(audio_h))
     audio_g, audio_h = audio_g[:n], audio_h[:n]

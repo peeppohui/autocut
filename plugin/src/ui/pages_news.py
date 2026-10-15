@@ -282,6 +282,25 @@ def page_news(parent, app):
     titles_txt.grid(row=0, column=0, columnspan=3, sticky="ew")
 
     # ------------------------------------------------------- сборка
+    def vo_path(src: str) -> str:
+        """Готовый путь к закадру нужной громкости.
+
+        Файл пользователя не трогаем: закадр редко бывает один и тот
+        же, и если бы мы правили его на месте, то второй запуск сюжета
+        считал бы уже нормализованный звук и поднял его ещё раз.
+        Поэтому копия рядом, в папке проекта, а исходник как был.
+        """
+        import loudness
+        src_p = Path(src)
+        if not src_p.is_file() or not loudness.enabled():
+            return str(src_p)
+        out_dir = Path(project()) / "voice"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dst = out_dir / f"vo_{src_p.name}"
+        rep = loudness.normalize(src_p, dst)
+        note.configure(text=loudness.describe(rep), text_color=T.MUTED)
+        return str(dst) if rep.get("ok") else str(src_p)
+
     def collect():
         """Собирает spec и возвращает (spec, замечания)."""
         bad = []
@@ -313,7 +332,7 @@ def page_news(parent, app):
             spec["broll"] = broll
         va = vo_audio.get().strip().strip('"')
         if va:
-            spec["vo"] = {"audio": va}
+            spec["vo"] = {"audio": vo_path(va)}
         standup = {}
         for key, var in (("media", st_media), ("audio", st_audio),
                          ("transcript", st_tx)):
