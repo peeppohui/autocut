@@ -56,7 +56,6 @@ MIN_FACE_W = float(settings.get("faces.min_face_w", 0.10))
 # картинка «растягивается» под кадр и мытьё видно невооружённым глазом
 MIN_CROP_FRAC = float(settings.get("faces.min_crop_frac", 0.70))
 SAMPLES_PER_CLIP = int(settings.get("faces.samples_per_clip", 3))
-FOLLOW_FACES = bool(settings.get("faces.follow_faces", True))
 SWAP_WHEN_BLANK = bool(settings.get("faces.swap_camera_when_blank", True))
 # --- ведение камеры ---
 # сколько раз в секунду опрашиваем детектор: между замерами окно идёт
@@ -416,10 +415,13 @@ def operator_path(track: Sequence[Tuple[float, Face]], t0: float, t1: float,
         tt = dur * i / max(1, n - 1)
         while j + 1 < len(ts) and ts[j + 1] <= tt:
             j += 1
-        if not ts or tt < ts[0]:
-            xs.append(None)
-            ys.append(None)
-            ws.append(None)
+        # до первого замера камера ещё не знает, куда смотрит: держим
+        # первое известное положение, а не None. Иначе медиана ниже
+        # сортирует список с None и падает на сравнении.
+        if tt < ts[0]:
+            xs.append(fx[0])
+            ys.append(fy[0])
+            ws.append(fw[0])
             continue
         if j + 1 >= len(ts):
             xs.append(fx[-1])

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 AutoCut — окно сбора рыбы. Терминал больше не нужен.
@@ -768,6 +768,7 @@ def page_vertical(parent, app):
               "--outdir", f"{o}/rz", "--device", dev.get()] + tgt_args()),
             ("3. Вертикаль 9:16",
              _steps.vertical_args(f"{o}/rz/selects.csv", o,
+                                  speed=float(speed.get() or 1.0),
                                   follow=follow.get(), device=dev.get())),
             ("4. XML для Premiere",
              premiere_args(vl, o, two_cam.get(), width=1080, height=1920)),

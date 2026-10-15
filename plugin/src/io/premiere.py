@@ -553,7 +553,16 @@ def _audio_track_el() -> ET.Element:
 
 
 def check_xml(root: ET.Element) -> List[str]:
-    """Самопроверка перед записью: дубли ID и висячие ссылки роняют импорт в Premiere."""
+    """Самопроверка перед записью.
+
+    Проверяется ровно то, что Premiere отвергает молча. Если он не
+    импортирует файл без единого сообщения, единственный способ узнать
+    причину - не дать ему испортить файл. Подробности в AGENTS.md.
+
+    Особенно важно правило про `<file>`: клип видеодорожки без ссылки на
+    свой файл ронял импорт ВСЕГО XML, хотя выглядел нормально. Пустая
+    панель видео, никакого сообщения - и непонятно, куда смотреть.
+    """
     errs: List[str] = []
     ids = [e.get("id") for e in root.iter() if e.get("id")]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
@@ -566,7 +575,62 @@ def check_xml(root: ET.Element) -> List[str]:
     n_a = len(root.findall(".//audio/track/clipitem"))
     if n_v == 0:
         errs.append("нет видео-клипов")
+
+    # --- правило, из-за которого теряли целые секвенции
+    no_file = [c.get("id") or "?" for c in root.iter("clipitem")
+               if c.find("file") is None]
+    if no_file:
+        errs.append(f"клипы без <file> (Premiere откажется импортировать "
+                    f"весь XML): {no_file[:6]}"
+                    + (f" и ещё {len(no_file) - 6}" if len(no_file) > 6 else ""))
+
+    # --- окна должны быть неотрицательными и непустыми
+    for c in root.iter("clipitem"):
+        vi = c.find("videoinpoints")
+        if vi is None:
+            continue
+        try:
+            a, b = int(vi.findtext("in")), int(vi.findtext("out"))
+        except (TypeError, ValueError):
+            errs.append(f"у клипа {c.get('id')} нечитаемое окно времени")
+            continue
+        if a < 0 or b <= a:
+            errs.append(f"у клипа {c.get('id')} пустое или отрицательное "
+                        f"окно: in={a} out={b}")
+        d = c.find("duration")
+        if d is not None:
+            try:
+                if abs(int(d.text)) < (b - a):
+                    errs.append(f"у клипа {c.get('id')} длительность "
+                                f"{d.text} короче окна {b - a}")
+            except (TypeError, ValueError):
+                pass
     return errs
+
+
+def missing_media(root: ET.Element) -> List[str]:
+    """Файлы, на которые ссылается XML, но которых нет на диске.
+
+    Отдельно от check_xml: это не ошибка разметки, а состояние папки,
+    и в логе сборки она должна звучать иначе, чем «XML негодный».
+
+    Путь в FCP7 лежит как file://localhost/E:/%D0%B8..., то есть
+    процент-кодировкой. Без разкодирования проверка видит сплошную
+    дичь и показывает отсутствующими файлы, которые на месте.
+    """
+    from urllib.parse import unquote
+    out = []
+    for p in root.iter("pathurl"):
+        url = (p.text or "").strip()
+        if not url.startswith("file://"):
+            continue
+        tail = url[len("file://"):]
+        if tail.lower().startswith("localhost/"):
+            tail = tail[len("localhost/"):]
+        path = Path(unquote(tail))
+        if not path.exists():
+            out.append(str(path))
+    return sorted(set(out))
 
 
 def write_pretty_xml(root: ET.Element, path: Path):

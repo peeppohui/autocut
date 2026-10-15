@@ -72,7 +72,12 @@ def synced_paths(project_dir) -> dict:
     p = Path(project_dir)
     sd = p / "synced"
     vids = [sd / "ref.mp4", sd / "cam.mp4"]
-    mics = [sd / "mic_host.wav", sd / "mic_guest.wav"]
+    # Порядок гостю, потом ведущему. Он обязан совпадать с тем, как
+    # микрофоны подписаны на шаге синхронизации (mic1 -> --mic-guest),
+    # и с порядком аргументов у interview.py. Раньше список был
+    # обратным, и микрофон ВЕДУЩЕГО уходил в --guest-mic: все его слова
+    # помечались как слова гостя и так уезжали в титры сюжета.
+    mics = [sd / "mic_guest.wav", sd / "mic_host.wav"]
     return {
         "videos": [str(v) for v in vids if v.is_file()],
         "mics": [str(m) for m in mics if m.is_file()],

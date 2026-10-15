@@ -95,6 +95,22 @@ def pipe_size(src_h: int, aspect: float) -> Tuple[int, int]:
     return (w, faces.even(src_h))
 
 
+def _out_filter(width: int, height: int, speed: float) -> str:
+    """Фильтр выхода для кадров, пришедших по пайпу.
+
+    setpts обязателен и здесь. Раньше его стояло только в пути без
+    слежения (cut_one), а на пути со слежением кадры уходили в пайп с
+    исходной частотой, значит ускорялся только звук через atempo, а
+    колонка duration всё равно делилась на скорость. Итог: картинка
+    длиннее звука и длиннее объявленной длительности - монтаж поедет
+    в Premiere, и заметить это можно только глазами.
+    """
+    vf = f"scale={width}:{height}"
+    if speed > 0 and speed != 1.0:
+        vf += f",setpts={1.0 / speed:.6f}*PTS"
+    return vf
+
+
 def render_tracked(src: Path, dst: Path, row: Dict, width: int, height: int,
                    speed: float, windows: List[Tuple[int, int, int, int]],
                    src_w: int, src_h: int, fps: float,
@@ -126,7 +142,7 @@ def render_tracked(src: Path, dst: Path, row: Dict, width: int, height: int,
     pipe_idx = aud_idx + 1
 
     output = ["-map", f"{pipe_idx}:v",
-              "-vf", f"scale={width}:{height}",
+              "-vf", _out_filter(width, height, speed),
               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
               "-pix_fmt", "yuv420p"]
     if ext or _has_audio(src):
@@ -140,8 +156,15 @@ def render_tracked(src: Path, dst: Path, row: Dict, width: int, height: int,
     proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error"] + inputs + output
                             + [str(dst)], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    cap = _open(src)
+    written = 0
+    # Пайп мог лопнуть на полпути (ffmpeg упал, диск кончился). Молчать
+    # тут нельзя: ffmpeg при обрыве stdin завершится с кодом 0 и
+    # допишет короткий файл, а длительность в раскладке считается от
+    # плана. Рассинхрон уехал бы в Premiere незаметно.
+    pipe_broke = False
+    cap = None
     try:
+        cap = _open(src)
         for box in windows:
             x, y, w, h = box
             x = max(0, min(x, src_w - 1))
@@ -160,20 +183,35 @@ def render_tracked(src: Path, dst: Path, row: Dict, width: int, height: int,
                 import cv2
                 piece = cv2.resize(piece, (ow, oh), interpolation=cv2.INTER_AREA)
             proc.stdin.write(piece.tobytes())
-    except (BrokenPipeError, OSError):
-        pass
+            written += 1
+    except (BrokenPipeError, OSError) as e:
+        pipe_broke = True
+        pipe_err = str(e)
     finally:
         try:
             proc.stdin.close()
         except OSError:
             pass
-        cap.release()
+        # cap может остаться None, если _open не открыл файл: процесс
+        # ffmpeg к этому моменту уже запущен, и его надо закрыть, иначе
+        # он висит, а шаг из окна не завершается
+        if cap is not None:
+            cap.release()
         err = (proc.stderr.read() or b"").decode("utf-8", "replace")
         proc.wait()
 
+    if pipe_broke:
+        return f"обрыв записи кадров ({written} из {len(windows)} " \
+               f"успело): {pipe_err}"
     if proc.returncode != 0 or not dst.is_file() or dst.stat().st_size == 0:
         lines = [s for s in err.strip().splitlines() if s.strip()]
         return lines[-1] if lines else f"ffmpeg код {proc.returncode}"
+    # кадров записано меньше, чем окон посчитано: значит исходник
+    # кончился раньше. Молча пропускать нельзя - длина куска в
+    # раскладке считается от плана, и кусок придёт короче обещанного.
+    if written < len(windows):
+        return f"исходник кончился раньше: кадров {written} из " \
+               f"{len(windows)}"
     return ""
 
 

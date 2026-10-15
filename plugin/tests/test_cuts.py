@@ -143,8 +143,8 @@ guard = interview.face_guard
 
 planned = [(0, 5, "гость", "текст", "gcam"),
            (5, 10, "ведущий", "текст", "wide")]
-fixed, n = guard(planned, {0: {"gcam": False, "wide": True},
-                           1: {"wide": True, "gcam": True}})
+fixed, n = guard(planned, {(0, 5): {"gcam": False, "wide": True},
+                           (5, 10): {"wide": True, "gcam": True}})
 ok("пустой ракурс меняется на ракурс с лицом", fixed[0][4] == "wide",
    str(fixed[0]))
 ok("нормальный ракурс не трогается", fixed[1][4] == "wide", str(fixed[1]))
@@ -152,30 +152,40 @@ ok("счётчик подмен посчитан", n == 1, str(n))
 ok("текст и таймкод не пострадали",
    fixed[0][:4] == (0, 5, "гость", "текст"), str(fixed[0]))
 
-fixed, n = guard(planned, {0: {"gcam": False, "wide": False},
-                           1: {"wide": True, "gcam": True}})
+fixed, n = guard(planned, {(0, 5): {"gcam": False, "wide": False},
+                           (5, 10): {"wide": True, "gcam": True}})
 ok("если лица нет нигде - ракурс оставляем", fixed[0][4] == "gcam",
    str(fixed[0]))
 ok("и подмены не засчитаны", n == 0, str(n))
 
-fixed, n = guard(planned, {0: {"gcam": True, "wide": False},
-                           1: {"wide": True, "gcam": True}})
+fixed, n = guard(planned, {(0, 5): {"gcam": True, "wide": False},
+                           (5, 10): {"wide": True, "gcam": True}})
 ok("желаемый ракурс с лицом не меняем", fixed[0][4] == "gcam", str(fixed[0]))
 
 fixed, n = guard(planned, {})
 ok("слежение не работало - ничего не трогаем",
    fixed == planned and n == 0, str(fixed))
 
-fixed, n = guard(planned, {0: {"gcam": False, "wide": True}})
-ok("по куску без данных не ломаемся, остальное как было",
+fixed, n = guard(planned, {(0, 5): {"gcam": False, "wide": True}})
+ok("по куску без данных - не ломаемся, остальное как было",
    len(fixed) == 2 and fixed[1] == planned[1] and n == 1, str(fixed))
 
 # сторож должен быть последним словом: он видит уже готовую раскладку
 # после balance_cameras и имеет право её перебить
 after_balance = [(0, 5, "гость", "текст", "wide")]
-fixed, n = guard(after_balance, {0: {"wide": False, "gcam": True}})
+fixed, n = guard(after_balance, {(0, 5): {"wide": False, "gcam": True}})
 ok("сторож перебивает правила разнообразия", fixed[0][4] == "gcam",
    str(fixed[0]))
+
+# РЕГРЕССИЯ. Лица меряются по полному списку кусков, а сторож работает
+# уже по укороченному - после отсева чёрных кадров. Ключ по номеру
+# приводил к тому, что ракурс выбирался по данным лица СОСЕДНЕГО куска.
+# Теперь ключ - сами таймкоды, и сдвиг не страшен.
+shifted = [(5.0, 8.0, "гость", "текст", "wide")]
+fixed, n = guard(shifted, {(0, 5): {"gcam": False, "wide": True},
+                           (5.0, 8.0): {"gcam": True, "wide": False}})
+ok("сдвиг нумерации не путает куски",
+   n == 1 and fixed[0][4] == "gcam", f"{n}, {fixed}")
 
 print()
 if fail:

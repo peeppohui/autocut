@@ -666,8 +666,14 @@ def balance_cameras(rows, share_a: float = 0.7, shot_min: float = 2.0,
 def face_scan(chunks, cams: Dict[str, Path]):
     """Где в каждом куске и в каждой камере есть вообще лицо.
 
-    Возвращает {номер куска: {камера: bool}}, либо {} если слежение
+    Возвращает {(начало, конец): {камера: bool}}, либо {} если слежение
     выключено или модель не загрузилась.
+
+    Ключ - сами таймкоды куска, а не его номер. Номер не годится:
+    до face_guard список уже прошёл через отсев чёрных кадров и
+    перебалансировку, то есть стал короче. Стоило выбросить один кусок
+    - и все индексы после него поехали, ракурс стал бы выбираться по
+    данным лица СОСЕДНЕГО куска. Молча и очень неприятно.
 
     Работает не по исходникам, а по отрезкам готовой рыбы: проверять
     два часа ради сотни замеров незачем, а рыба - это минуты.
@@ -685,7 +691,7 @@ def face_scan(chunks, cams: Dict[str, Path]):
         print(f"Слежение за лицом отключено: {str(e)[:160]}")
         return out
     blank = 0
-    for idx, (i, o, _sp, _text) in enumerate(chunks):
+    for i, o, _sp, _text in chunks:
         per = {}
         for key, path in cams.items():
             p = Path(path)
@@ -698,7 +704,7 @@ def face_scan(chunks, cams: Dict[str, Path]):
                 per[key] = False
                 continue
             per[key] = faces.has_usable_face(samples, 0.5, min_w)
-        out[idx] = per
+        out[(round(i, 3), round(o, 3))] = per
         if per and not any(per.values()):
             blank += 1
     if blank:
@@ -716,15 +722,15 @@ def face_guard(planned, faces_ok):
     спорят, выигрывает то, без чего ролик нельзя выпустить: кадр с
     пустотой никто не отсмотрит дважды.
 
-    faces_ok: {номер куска: {камера: bool}} из face_scan. Пустой словарь
+    faces_ok: {(начало, конец): {камера: bool}} из face_scan. Пустой словарь
     означает «слежение не работало» - тогда ничего не трогаем.
     """
     if not faces_ok:
         return planned, 0
     fixed, swaps = [], 0
-    for idx, row in enumerate(planned):
+    for row in planned:
         i, o, sp, text, want = row
-        per = faces_ok.get(idx)
+        per = faces_ok.get((round(i, 3), round(o, 3)))
         if not per:
             fixed.append(row)
             continue
@@ -909,6 +915,12 @@ def run_from_transcript(args) -> int:
     """Сборка selects из правленого transcript.txt (второй проход:
     текст уже вычищен человеком). Видео нужны для путей, микрофоны — нет."""
     out = Path(args.outdir)
+    # Папку результата создаём сами. Раньше она появлялась только
+    # побочным эффектом: кэш чёрных кадров внутри себя создавал папку.
+    # С выключенной в настройках отсечкой пустых кадров (или если
+    # кэш уже был готов) папки не было, и кнопка «Собрать из
+    # правленого текста» падала на FileNotFoundError.
+    out.mkdir(parents=True, exist_ok=True)
     wide = Path(args.wide)
     gcam = Path(args.guest_cam)
     if not wide.is_file() or not gcam.is_file():
