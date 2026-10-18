@@ -101,15 +101,29 @@ ok("self.state не затирает метод Tk", not isinstance(app.state, d
 ok("состояние запуска отдельно", isinstance(app.run_state, dict))
 
 # --- цепочки шагов те же, что до переезда ---
+# --- дайджест ---
+# Блок переписан: он сам разбирает материал на стендап/нарезку/интервью
+# (sorter.py), потом собирает речь и нарезку (digest.py), и только потом
+# отдаёт Premiere. Раньше здесь был detect+autocut только для нарезки,
+# стендап и интервью не участвовали. Проверяем, что новый порядок шагов
+# на месте и Premiere получает уже собранный plan.csv, а не пустоту.
 ok("дайджест: кнопка отправила шаги",
-   fill_and_press("Дайджест", "Собрать рыбу", [FAKE_DIR]) and bool(captured))
+   fill_and_press("Дайджест", "Собрать дайджест", [FAKE_DIR])
+   and bool(captured))
 d = [t for t, _ in captured[-1]]
 ok("дайджест: шаги по порядку",
-   d == ["1. Определяю планы", "2. Раскладываю по склейкам",
+   d == ["1. Разбираю материал на части", "2. Собираю речь и нарезку",
          "3. XML для Premiere"], str(d))
-argv = dict(captured[-1])["2. Раскладываю по склейкам"]
-ok("дайджест: режим digest на месте", "--mode" in argv
-   and "digest" in argv, str(argv[:6]))
+sorter_argv = dict(captured[-1])["1. Разбираю материал на части"]
+ok("дайджест: сортировщик вызван", "sorter.py" in " ".join(sorter_argv),
+   str(sorter_argv[:6]))
+digest_argv = dict(captured[-1])["2. Собираю речь и нарезку"]
+ok("дайджест: сборка идёт через digest.py",
+   any("digest.py" in a for a in digest_argv), str(digest_argv[:6]))
+prem_argv = dict(captured[-1])["3. XML для Premiere"]
+ok("дайджест: Premiere получает plan.csv, а не старый timeline.csv",
+   any("plan.csv" in a for a in prem_argv)
+   and not any("timeline.csv" in a for a in prem_argv), str(prem_argv[:6]))
 
 fill_and_press("Интервью 1 видео", "Собрать рыбу", [str(FAKE)])
 one = [t for t, _ in captured[-1]]

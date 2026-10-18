@@ -552,11 +552,16 @@ def page_settings(parent, app):
 
 
 def page_digest(parent, app):
-    """Дайджест: папка исходников -> раскладка по планам."""
+    """Дайджест: стендап + нарезка + интервью -> одна секвенция.
+
+    Блок самодостаточен: разбирает материал по трём частям (если ещё не
+    разложен), собирает речь, кладёт нарезку по крупности и отдаёт
+    Premiere. Внутри — тот же набор шагов, что человек делал руками.
+    """
     wrap = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-    src = T.card(wrap, "Исходники")
-    inp = T.field(src, 0, "Папка исходников", ctk.StringVar(),
-                  browse=lambda: app.pick_dir(inp, "Папка исходников"))
+    src = T.card(wrap, "Материал")
+    inp = T.field(src, 0, "Папка с материалами", ctk.StringVar(),
+                  browse=lambda: app.pick_dir(inp, "Папка с материалами"))
     out = T.field(src, 1, "Куда сложить", ctk.StringVar(),
                   browse=lambda: app.pick_dir(out, "Куда сложить"))
     tgt = T.field(src, 2, "Хронометраж, сек", ctk.StringVar(
@@ -564,40 +569,47 @@ def page_digest(parent, app):
     mus = T.field(src, 3, "Музыка (необязательно)", ctk.StringVar(),
                   browse=lambda: app.pick_file(mus, "Музыка"))
     dev = T.device_row(src, 4)
+    note = ctk.CTkLabel(wrap, text="", text_color=T.SUCCESS, anchor="w",
+                        font=T.font(12), wraplength=900, justify="left")
+    note.pack(anchor="w", padx=T.PAD, pady=(0, 8))
 
     def run():
-        s = app.need(inp, "папку исходников")
+        s = app.need(inp, "папку с материалами")
         if not s:
             return
         o = out.get().strip().strip('"') or str(BASE / "digest_out")
         Path(o).mkdir(parents=True, exist_ok=True)
         t = tgt.get().strip() or str(settings.get("digest.target_sec", 120))
+        # Шаг 1 — разбор по частям. Если папки уже есть, sorter скажет
+        # об этом и выйдет с кодом 0, не трогая ничего: повторный запуск
+        # не должен заново раскладывать уже разложенное.
         steps = [
-            ("1. Определяю планы", [str(ML / "detect.py"), "--input", s,
-                                    "--output", f"{o}/clips.csv", "--preview",
-                                    f"{o}/preview", "--device", dev.get()]),
-            ("2. Раскладываю по склейкам", [str(MODES / "autocut.py"),
-                                            "--csv", f"{o}/clips.csv",
-                                            "--mode", "digest", "--auto",
-                                            "--finale-wide", "--target-sec", t,
-                                            "--out", f"{o}/timeline.csv"]),
+            ("1. Разбираю материал на части",
+             [str(ML / "sorter.py"), "--input", s]),
+            ("2. Собираю речь и нарезку",
+             [str(MODES / "digest.py"), "--input", s, "--out", o,
+              "--target-sec", t, "--device", dev.get()]),
         ]
+        n = 3
         if mus.get().strip():
-            steps.append(("3. Подложка", [str(ML / "music.py"), "--music",
-                                          mus.get().strip(), "--duration", t,
-                                          "--out", f"{o}/bed.wav"]))
-            steps.append(("4. XML для Premiere",
-                          premiere_args(f"{o}/timeline.csv", s)
-                          + ["--music", f"{o}/bed.wav"]))
-        else:
-            steps.append(("3. XML для Premiere",
-                          premiere_args(f"{o}/timeline.csv", s)))
-        app.log("Проверь preview после шага 1: где уверенность <= 0.65 — "
-                "поправь CSV и жми снова.")
+            steps.append((f"{n}. Подложка",
+                          [str(ML / "music.py"), "--music", mus.get().strip(),
+                           "--genre", "digest", "--duration", t,
+                           "--out", f"{o}/bed.wav"]))
+            n += 1
+        pa = premiere_args(f"{o}/plan.csv", s)
+        if mus.get().strip():
+            pa += ["--music", f"{o}/bed.wav"]
+        steps.append((f"{n}. XML для Premiere", pa))
+        note.configure(text="Собираю: речь распознаётся, это минуты на "
+                             "папку. Порядок в ролике: стендап, нарезка, "
+                             "интервью.")
+        note.after(6000, lambda: note.configure(text=""))
+        app.log("Смотри отчёт sorter, если что-то легло не в свою часть.")
         app.go(steps, o)
 
-    T.btn(wrap, "Собрать рыбу", "primary", width=180, command=run).pack(
-        anchor="w", padx=T.PAD, pady=(0, T.PAD))
+    T.btn(wrap, "Собрать дайджест", "primary", width=200,
+          command=run).pack(anchor="w", padx=T.PAD, pady=(0, T.PAD))
     panel_result.add_to(wrap, app, out)
     return wrap
 
@@ -844,12 +856,12 @@ TPL = [
 # Слева: сначала то, чем пользуешься каждый день, потом остальное.
 GROUPS = [
     ("Основное", [("Интервью 2 камеры", page_multi),
+                  ("Дайджест", page_digest),
                   ("Новостной сюжет", pages_news.page_news),
                   ("Вертикаль 9:16", page_vertical),
                   ("Настройки", page_settings),
                   ("Ход работы", page_log)]),
-    ("Другие шаблоны", [("Дайджест", page_digest),
-                        ("Интервью 1 видео", page_single),
+    ("Другие шаблоны", [("Интервью 1 видео", page_single),
                         ("Проверка готового", page_review)]),
 ]
 
