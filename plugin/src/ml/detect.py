@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bootstrap  # noqa: F401  — регистрирует src/config в sys.path
 import settings
+from sharpness import median_floor, score as _sharp_score, usable  # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -303,6 +304,15 @@ def sample_frames(path: Path, n: int = 7):
     return frames
 
 
+def analyse_sharpness(path: Path, n: int = 7):
+    """(резкость, тряска) по кадрам того же клипа."""
+    try:
+        frames = sample_frames(path, n)
+    except Exception:
+        return 0.0, 0.0
+    return _sharp_score(frames)
+
+
 def load_yolo(model_name: str = "yolov8n-pose.pt", device: str = "auto"):
     try:
         from ultralytics import YOLO
@@ -433,6 +443,10 @@ def main(argv=None) -> int:
     ap.add_argument("--preview", default="_preview", help="папка превью (для ручной проверки)")
     ap.add_argument("--limit", type=int, default=0, help="взять только N первых файлов (для пробы)")
     ap.add_argument("--device", default="auto", help="auto|cpu|cuda (auto: GPU если завелась)")
+    ap.add_argument("--no-blur", action="store_true",
+                    help="не отсеивать расфокус и тряску. По умолчанию "
+                         "отсеиваются: стандарт требует минимизировать и то "
+                         "и другое, а мытьё в эфире видно сразу")
     args = ap.parse_args(argv)
 
     inp = Path(args.input)
@@ -455,14 +469,43 @@ def main(argv=None) -> int:
         return 1
 
     rows = []
+    sharp_scores: Dict[str, float] = {}
     for i, v in enumerate(videos, 1):
         try:
             pv = Path(args.preview) / (v.stem + ".jpg")
             r = analyse_video(v, model, n_frames=args.frames, save_preview=pv, conf=args.conf)
+            # Резкость и тряска меряются на тех же кадрах, что и поза:
+            # файл уже открыт, второй раз декодировать смысла нет.
+            r["sharp"], r["shake"] = analyse_sharpness(v)
+            sharp_scores[v.name] = r["sharp"]
             rows.append(r)
-            print(f"[{i}/{len(videos)}] {v.name}: {r['plan']} (увер. {r['conf']}, людей макс {r['people_max']}) — {r['explain']}")
+            print(f"[{i}/{len(videos)}] {v.name}: {r['plan']} (увер. {r['conf']}, людей макс {r['people_max']}, "
+                  f"резкость {r['sharp']:.0f}, тряска {r['shake']:.2f})")
         except Exception as e:
             print(f"[{i}/{len(videos)}] {v.name}: ОШИБКА {e}")
+
+    # Порог резкости считается от медианы самой папки: перебивки сняты
+    # одним светом, и абсолютное число у ночной съёмки с зерном занизило
+    # бы норму вдвое.
+    if args.no_blur or not bool(settings.get("sharp.enabled", True)):
+        kept = rows
+    else:
+        floor = median_floor(list(sharp_scores.values()),
+                             float(settings.get("sharp.floor_factor", 0.35)))
+        shake_max = float(settings.get("sharp.shake_max", 0.05))
+        kept = []
+        for r in rows:
+            good, why = usable(r["sharp"], r["shake"], floor, shake_max)
+            if good:
+                kept.append(r)
+            else:
+                print(f"  выброшено: {r['file']} — {why}")
+        if floor > 0:
+            print(f"Расфокус и тряска отсеяны по порогам: резкость < "
+                  f"{floor:.0f} (медиана папки x "
+                  f"{settings.get('sharp.floor_factor', 0.35)}), "
+                  f"тряска > {shake_max:.2f}.")
+    rows = kept
 
     out = Path(args.output)
     with open(out, "w", encoding="utf-8-sig", newline="") as f:
