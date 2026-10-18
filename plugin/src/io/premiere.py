@@ -17,6 +17,7 @@ AutoCut Premiere — выгрузка готового таймлайна в Ado
 
 from __future__ import annotations
 import argparse
+import copy
 import csv
 import sys
 import xml.etree.ElementTree as ET
@@ -535,7 +536,35 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         ET.SubElement(mk, "in").text = tc(start, fps)
         ET.SubElement(mk, "out").text = tc(start, fps)
 
+    # Плашки: маркер с началом и КОНЦОМ, чтобы монтажёр поставил шаблон и
+    # сразу увидел, сколько плашка должна висеть. Без конца монтажёр ставит
+    # её на глаз и через два кадра убирает, а стандарт требует не меньше
+    # пяти секунд.
     return xmeml
+
+
+def add_lower_markers(root: ET.Element, entries: List[Dict],
+                      fps: int) -> List[Dict]:
+    """Дописывает маркеры плашек в готовый XML. Возвращает, что добавил."""
+    if not entries:
+        return []
+    seq = root.find("sequence")
+    if seq is None:
+        return []
+    for e in entries:
+        s = int(round(e["start"] * fps))
+        fin = int(round((e["start"] + e["dur"]) * fps))
+        mk = ET.SubElement(seq, "marker")
+        ET.SubElement(mk, "name").text = f"ПЛАШКА: {e['fio']}"
+        who = f"{e['fio']}"
+        if e.get("position"):
+            who += f" — {e['position']}"
+        ET.SubElement(mk, "comment").text = (
+            f"{who} | шаблон {e.get('template', 'SVS_low_third')}, "
+            f"висит {e['dur']:.0f}с (минимум 5с)")
+        ET.SubElement(mk, "in").text = tc(s, fps)
+        ET.SubElement(mk, "out").text = tc(fin, fps)
+    return entries
 
 
 def _rate_el(fps: int) -> ET.Element:
@@ -678,6 +707,12 @@ def main(argv=None) -> int:
     ap.add_argument("--trim-rec", action="store_true",
                     help="РЫБА: урезать каждый кусок до верха нормы плана "
                          "(общий 8с, средний 5-6с, крупный 4с, деталь 3с), брать из середины")
+    ap.add_argument("--also-draft", default="",
+                    help="второй XML — ЧЕРНОВИК для отбора кадров. Тот же "
+                         "порядок и те же файлы, но куски не урезаны: на "
+                         "черновике видно, КАКИЕ кадры отобраны, а чистовик "
+                         "для этого уже подрезан по нормам плана. Секунций "
+                         "в работе две — так требует стандарт медиацентра")
     ap.add_argument("--music", default="", help="готовая подложка (wav из music.py) на дорожку A2")
     ap.add_argument("--audio", nargs="*", default=[],
                     help="целые аудиодорожки (микрофоны): --audio гость.wav ведущий.wav")
@@ -715,10 +750,39 @@ def main(argv=None) -> int:
         for c in missing[:5]:
             print(f"  нет: {c['abspath']}")
 
+    # Плашки: считаем их до сборки, потому что нужны длительности в
+    # секундах, а build_fcp7 оперирует кадрами и перетирает их своими.
+    _lt = _who = None
+    if bool(settings.get("lower_thirds.enabled", True)):
+        try:
+            import plashki as _lt
+            _who = {k: v for k, v in _lt.people().items() if v.get("fio")}
+        except Exception:
+            _who = {}
+        if not _who:
+            print("Плашки не намечены: не заполнено ФИО "
+                  "(lower_thirds.people в настройках).")
+
     root = build_fcp7(clips, fps=args.fps, width=args.width, height=args.height,
                       seq_name=args.name, trim_rec=args.trim_rec, audios=audios,
                       markers=not args.no_markers,
                       stacked=args.stacked)
+    # Плашки считаются ПОСЛЕ сборки: только теперь известны настоящие
+    # длительности в секвенции. Считать раньше нельзя — при --trim-rec
+    # куски укорачиваются, и таймкод плашки уехал бы от её места.
+    if _who:
+        ents, notes = _lt.plan(clips, _who,
+                               float(settings.get("lower_thirds.min_sec", 5.0)),
+                               args.fps)
+        tpl = str(settings.get("lower_thirds.template", "SVS_low_third"))
+        for e in ents:
+            e["template"] = tpl
+        lower_marks = add_lower_markers(root, ents, args.fps)
+        if ents:
+            print(f"Плашек {len(ents)}: маркеры в секвенции, шаблон {tpl}.")
+        for n in notes:
+            print(f"  Пропущено: {n}")
+
     problems = check_xml(root)
     if problems:
         print("XML не записан — структура битая (это баг, пришли мне эти строки):")
@@ -741,6 +805,31 @@ def main(argv=None) -> int:
     if args.edl:
         write_edl(clips, Path(args.edl), fps=args.fps, trim_rec=args.trim_rec)
         print(f"EDL сохранён: {args.edl} (запасной вариант).")
+
+    # --- черновик для отбора кадров ---
+    # По стандарту медиацентра секвенций две. Черновик смотрит не тайминг,
+    # а отбор: поэтому куски в нём не урезаны. Список клипов копируется,
+    # иначе вторая сборка затёрла бы расчёт длительности у чистовика,
+    # который напечатан строчкой выше.
+    if args.also_draft:
+        draft = build_fcp7(copy.deepcopy(clips), fps=args.fps,
+                           width=args.width, height=args.height,
+                           seq_name=f"{args.name} — черновик",
+                           trim_rec=False, audios=audios,
+                           markers=not args.no_markers, stacked=args.stacked)
+        dprob = check_xml(draft)
+        if dprob:
+            print("Черновик не записан — структура битая:")
+            for p in dprob:
+                print("  ! " + p)
+        else:
+            write_pretty_xml(draft, Path(args.also_draft))
+            print(f"Черновик сохранён: {args.also_draft} "
+                  f"({len(clips)} клипов, куски целиком).")
+            if not args.trim_rec:
+                print("  Он совпадает с чистовиком: урезание выключено, "
+                      "а для точных кусков интервью оно и не применялось. "
+                      "Чтобы черновик отличался, собери с --trim-rec.")
     total_s = sum(c["_used"] for c in clips) / args.fps
     raw_s = sum(c["_orig"] for c in clips) / args.fps
     if args.trim_rec:

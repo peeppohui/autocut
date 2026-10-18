@@ -323,6 +323,7 @@ class App(ctk.CTk):
 # импортировать app, а app импортирует страницы.
 premiere_args = _steps.premiere_args
 srt_args = _steps.srt_args
+plashki_args = _steps.plashki_args
 sync_args = _steps.sync_args
 
 
@@ -354,12 +355,43 @@ def page_multi(parent, app):
 
     dst = T.card(wrap, "Результат")
     out = T.field(dst, 0, "Папка проекта", ctk.StringVar(),
-                  browse=lambda: app.pick_dir(out, "Куда сложить"))
+                browse=lambda: app.pick_dir(out, "Куда сложить"))
+
+    lt = T.card(wrap, "Плашки",
+            "ФИО и должность — их рисует AutoCut и вешает монтажёр")
+    guest_fio = T.field(lt, 0, "Гость: ФИО", ctk.StringVar(),
+                    "Имя Фамилия", settings.get("lower_thirds.people.гость.fio", ""))
+    guest_pos = T.field(lt, 1, "Гость: должность", ctk.StringVar(),
+                    "студентка, корреспондент...",
+                    settings.get("lower_thirds.people.гость.position", ""))
+    host_fio = T.field(lt, 2, "Ведущий: ФИО", ctk.StringVar(),
+                   "Имя Фамилия", settings.get("lower_thirds.people.ведущий.fio", ""))
+    host_pos = T.field(lt, 3, "Ведущий: должность", ctk.StringVar(),
+                   "должность",
+                   settings.get("lower_thirds.people.ведущий.position", ""))
+
+    def save_people():
+        """ФИО пишут в settings.json, а не в отдельный файл проекта.
+
+        Так плашки одинаковы во всех роликах медиацентра: корреспондент
+        один и тот же, и переписывать его ФИО перед каждым съёмочным
+        днём незачем. Пустая строка означает «этого человека нет».
+        """
+        for role, fio, pos in (("гость", guest_fio, guest_pos),
+                               ("ведущий", host_fio, host_pos)):
+            settings.set_value(f"lower_thirds.people.{role}.fio",
+                               fio.get().strip())
+            settings.set_value(f"lower_thirds.people.{role}.position",
+                               pos.get().strip())
+
+    T.btn(lt, "Сохранить ФИО", "ghost", width=180,
+          command=save_people).grid(row=4, column=0, sticky="w",
+                                    pady=(8, 0))
     T.field(dst, 1, "Правленый transcript.txt", app.transcript_path,
-            "нужно только для второй кнопки",
-            browse=lambda: app.pick_file(app.transcript_path,
-                                         "Правленый transcript.txt",
-                                         [("Текст", "*.txt")]))
+        "нужно только для второй кнопки",
+        browse=lambda: app.pick_file(app.transcript_path,
+                                     "Правленый transcript.txt",
+                                     [("Текст", "*.txt")]))
 
     def tgt_args():
         v = tgt.get().strip()
@@ -374,7 +406,8 @@ def page_multi(parent, app):
         которые тут ничего не меняют.
         """
         tl = timeline or f"{o}/rz/selects.csv"
-        return [("XML для Premiere", premiere_args(tl, o, two_cam.get()))], tl
+        return [("Плашки", plashki_args(tl, o)),
+                ("XML для Premiere", premiere_args(tl, o, two_cam.get()))], tl
 
     def run_from_tx():
         t = app.transcript_path.get().strip().strip('"')
@@ -630,9 +663,10 @@ def page_single(parent, app):
             app.warn(f"CSV перебивок не найден, иду без прикрытия стыков: {b}")
         steps = [
             ("1. Рыба по тексту", argv),
-            ("2. XML для Premiere",
+            ("2. Плашки", plashki_args(f"{o}/rz/selects.csv", o)),
+            ("3. XML для Premiere",
              premiere_args(f"{o}/rz/selects.csv", o)),
-            ("3. Субтитры", srt_args(f"{o}/rz/selects.csv", o)),
+            ("4. Субтитры", srt_args(f"{o}/rz/selects.csv", o)),
         ]
         app.go(steps, o)
 

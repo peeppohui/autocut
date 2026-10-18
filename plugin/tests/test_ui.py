@@ -114,7 +114,8 @@ ok("дайджест: режим digest на месте", "--mode" in argv
 fill_and_press("Интервью 1 видео", "Собрать рыбу", [str(FAKE)])
 one = [t for t, _ in captured[-1]]
 ok("одно видео: шаги по порядку",
-   one == ["1. Рыба по тексту", "2. XML для Premiere", "3. Субтитры"],
+   one == ["1. Рыба по тексту", "2. Плашки", "3. XML для Premiere",
+        "4. Субтитры"],
    str(one))
 
 # без файлов кнопка обязана просить, а не падать и не вешать тест
@@ -210,15 +211,20 @@ NEWS_VALS = [FAKE_DIR, "", "", "", "",
 fill_and_press("Новостной сюжет", "Собрать сюжет", list(NEWS_VALS))
 news_steps = [t for t, _ in captured[-1]]
 ok("сюжет: шаги по порядку",
-   news_steps == ["1. Раскладка сюжета", "2. XML для Premiere", "3. Субтитры"],
+   news_steps == ["1. Раскладка сюжета", "2. Плашки",
+                  "3. XML для Premiere", "4. Субтитры"],
    str(news_steps))
 news_argv = dict(captured[-1])["1. Раскладка сюжета"]
 ok("сюжет: spec и outdir передаются",
    "--spec" in news_argv and "--outdir" in news_argv, str(news_argv))
-prem_argv = dict(captured[-1])["2. XML для Premiere"]
+prem_argv = dict(captured[-1])["3. XML для Premiere"]
 ok("сюжет: premiere получает selects.csv сюжета",
    prem_argv[prem_argv.index("--timeline") + 1].replace("\\", "/")
    .endswith("rz/selects.csv"), str(prem_argv))
+plash_argv = dict(captured[-1])["2. Плашки"]
+ok("сюжет: плашки строятся по той же раскладке",
+   plash_argv[plash_argv.index("--timeline") + 1].replace("\\", "/")
+   .endswith("rz/selects.csv"), str(plash_argv))
 # главное: spec.json должен существовать и быть валидным, иначе шаг 1
 # упадёт уже после того, как пользователь отсидит всю сборку
 spec_path = _P(FAKE_DIR) / "spec.json"
@@ -332,8 +338,9 @@ _ONE_DIR = str(_P(FAKE).parent)
 fill_and_press("Интервью 1 видео", "Собрать рыбу",
                [str(FAKE), _ONE_DIR, "", str(_bcsv)])
 ok("одна камера: шаги по порядку",
-   [t for t, _ in captured[-1]] == ["1. Рыба по тексту", "2. XML для Premiere",
-                                    "3. Субтитры"], str([t for t, _ in captured[-1]]))
+   [t for t, _ in captured[-1]] == ["1. Рыба по тексту", "2. Плашки",
+                                    "3. XML для Premiere", "4. Субтитры"],
+   str([t for t, _ in captured[-1]]))
 argv1 = dict(captured[-1])["1. Рыба по тексту"]
 ok("CSV перебивок реально передаётся в интервью",
    "--broll" in argv1 and str(_bcsv) in argv1, str(argv1))

@@ -30,11 +30,16 @@ import settings                              # noqa: E402
 
 
 def premiere_args(timeline, project, stacked=False, music=None,
-                  width=None, height=None):
+                  width=None, height=None, draft=True):
     """Аргументы сборки XML для Premiere.
 
     width/height нужны вертикали: медиа уже 1080x1920, и если секвенция
     объявлена 1920x1080, Premiere покажет ролик в чёрных полях.
+
+    draft — вторая секвенция для отбора кадров. По стандарту медиацентра
+    секвенций две: на черновике смотрят, КАКИЕ кадры отобраны (куски
+    целиком), а чистовик уже подрезан по нормам плана. Отключать имеет
+    смысл, когда черновик совпал бы с чистовиком один в один.
     """
     p = Path(project)
     argv = [str(IO / "premiere.py"), "--timeline", str(timeline),
@@ -47,6 +52,8 @@ def premiere_args(timeline, project, stacked=False, music=None,
         argv += ["--edl", str(p / "ryba.edl")]
     if bool(settings.get("export.trim_to_plan", True)):
         argv += ["--trim-rec"]
+        if draft:
+            argv += ["--also-draft", str(p / "chernovik.xml")]
     if stacked:
         argv.append("--stacked")
     if music:
@@ -65,6 +72,21 @@ def vertical_args(selects, project, width=1080, height=1920, speed=1.0,
         # --no-face есть именно потому, что слежение гоняет нейросеть по
         # каждому куску. Кто-то захочет быстрый центральный кроп.
         argv.append("--no-face")
+    return argv
+
+
+def plashki_args(timeline, project, every_appearance=False):
+    """Аргументы сборки плашек: PNG для согласования и список с таймкодами.
+
+    Отдельный шаг, а не часть premiere.py: картинка нужна ДО сборки,
+    её показывают тому, кто согласует, и только потом ставят шаблон в
+    Premiere. Если ФИО не заполнены, модуль скажет об этом и выйдет без
+    ошибки — плашек просто не будет.
+    """
+    argv = [str(IO / "plashki.py"), "--timeline", str(timeline),
+            "--outdir", str(Path(project) / "plashki")]
+    if every_appearance:
+        argv.append("--every-appearance")
     return argv
 
 

@@ -432,9 +432,10 @@ def page_news(parent, app):
             ("1. Раскладка сюжета",
              [str(MODES / "news_package.py"), "--spec", str(spec_path),
               "--outdir", rz]),
-            ("2. XML для Premiere",
-             STEPS.premiere_args(f"{rz}/selects.csv", o)),
-            ("3. Субтитры", STEPS.srt_args(f"{rz}/selects.csv", o)),
+("2. Плашки", STEPS.plashki_args(f"{rz}/selects.csv", o)),
+        ("3. XML для Premiere",
+         STEPS.premiere_args(f"{rz}/selects.csv", o)),
+            ("4. Субтитры", STEPS.srt_args(f"{rz}/selects.csv", o)),
         ], o)
 
     # ------------------------------------------------------- кнопки
