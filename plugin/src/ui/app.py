@@ -559,7 +559,8 @@ def page_digest(parent, app):
                   browse=lambda: app.pick_dir(inp, "Папка исходников"))
     out = T.field(src, 1, "Куда сложить", ctk.StringVar(),
                   browse=lambda: app.pick_dir(out, "Куда сложить"))
-    tgt = T.field(src, 2, "Хронометраж, сек", ctk.StringVar(value="60"))
+    tgt = T.field(src, 2, "Хронометраж, сек", ctk.StringVar(
+        value=str(settings.get("digest.target_sec", 120))))
     mus = T.field(src, 3, "Музыка (необязательно)", ctk.StringVar(),
                   browse=lambda: app.pick_file(mus, "Музыка"))
     dev = T.device_row(src, 4)
@@ -570,7 +571,7 @@ def page_digest(parent, app):
             return
         o = out.get().strip().strip('"') or str(BASE / "digest_out")
         Path(o).mkdir(parents=True, exist_ok=True)
-        t = tgt.get().strip() or "60"
+        t = tgt.get().strip() or str(settings.get("digest.target_sec", 120))
         steps = [
             ("1. Определяю планы", [str(ML / "detect.py"), "--input", s,
                                     "--output", f"{o}/clips.csv", "--preview",

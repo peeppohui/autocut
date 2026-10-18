@@ -304,13 +304,40 @@ def sample_frames(path: Path, n: int = 7):
     return frames
 
 
-def analyse_sharpness(path: Path, n: int = 7):
-    """(резкость, тряска) по кадрам того же клипа."""
+def analyse_sharpness(path: Path, n: int = 7, run_sec: float = 1.5,
+                      fps: int = 25):
+    """(резкость, тряска) по клипу.
+
+    Резкость меряется по кадрам, размазанным по всему клипу. Тряска — по
+    НЕПРЕРЫВНОМУ куску кадров из середины: разброс, посчитанный по
+    размазанным кадрам, измеряет движение объекта в кадре, а не тряску
+    камеры, и на живой съёмке путал кадры со штатива с ручными.
+    """
     try:
-        frames = sample_frames(path, n)
+        spread = sample_frames(path, n)
+        run = consecutive_frames(path, run_sec, fps)
     except Exception:
         return 0.0, 0.0
-    return _sharp_score(frames)
+    return _sharp_score(spread, run or None)
+
+
+def consecutive_frames(path: Path, seconds: float = 1.5, fps: int = 25,
+                       at: float = 0.5):
+    """N подряд идущих кадров из середины клипа."""
+    import cv2
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        return []
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(total * at)))
+    out = []
+    for _ in range(max(2, int(seconds * fps))):
+        ok, fr = cap.read()
+        if not ok or fr is None:
+            break
+        out.append(fr)
+    cap.release()
+    return out
 
 
 def load_yolo(model_name: str = "yolov8n-pose.pt", device: str = "auto"):
