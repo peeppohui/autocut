@@ -87,16 +87,32 @@ def main(argv=None) -> int:
     ap.add_argument("--duration", type=float, required=True, help="хронометраж секвенции (сек)")
     ap.add_argument("--duck", default="", help="speech.json из interview.py (дакинг под речь)")
     ap.add_argument("--out", default="bed.wav", help="выход (48кГц стерео wav)")
-    ap.add_argument("--bed-db", type=float,
-                    default=float(settings.get("music.bed_db", -20.0)),
-                    help="уровень в паузах")
-    ap.add_argument("--duck-db", type=float,
-                    default=float(settings.get("music.duck_db", -32.0)),
-                    help="уровень под речью")
+    ap.add_argument("--genre", choices=["interview", "digest"],
+                    default="interview",
+                    help="жанр ролика. По стандарту медиацентра в дайджесте "
+                         "подложка идёт ВМЕСТЕ голоса и поднимается до -6, "
+                         "а в интервью и репортаже держится ниже -30")
+    ap.add_argument("--bed-db", type=float, default=None,
+                    help="уровень в паузах (пусто — по жанру и настройкам)")
+    ap.add_argument("--duck-db", type=float, default=None,
+                    help="уровень под речью (пусто — по жанру и настройкам)")
     ap.add_argument("--fade", type=float,
                     default=float(settings.get("music.fade_sec", 2.0)),
                     help="фейды вх/вых (сек)")
     args = ap.parse_args(argv)
+
+    if args.genre == "digest":
+        args.bed_db = (float(settings.get("music.digest_bed_db", -6.0))
+                       if args.bed_db is None else args.bed_db)
+        args.duck_db = (float(settings.get("music.digest_duck_db", -12.0))
+                        if args.duck_db is None else args.duck_db)
+    else:
+        args.bed_db = (float(settings.get("music.bed_db", -30.0))
+                       if args.bed_db is None else args.bed_db)
+        args.duck_db = (float(settings.get("music.duck_db", -36.0))
+                        if args.duck_db is None else args.duck_db)
+    print(f"Жанр {args.genre}: подложка {args.bed_db:.1f} дБ, "
+          f"под речью {args.duck_db:.1f} дБ, переход {args.fade:.1f} с.")
 
     music = Path(args.music)
     if not music.is_file():

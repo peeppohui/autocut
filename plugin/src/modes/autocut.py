@@ -168,9 +168,16 @@ def score_joint(a: Clip, b: Clip) -> Joint:
                      f"Прыжок через два ({a.plan} -> {b.plan}): допустимо при смене акцента, но мягче было бы через один. "
                      f"Держите план подольше, добавьте движение/звуковую связку (J/L-cut).")
     # d >= 4
+    if d > MAX_SCALE_JUMP:
+        return Joint(30, "ПЛОХО",
+                     f"Негармоничный перепад ({a.plan} -> {b.plan}): это {d} ступеней "
+                     f"по шкале Кулешова при пороге {MAX_SCALE_JUMP}. Так близкая "
+                     f"деталь с дальним видом и не монтируется. Ведите ступенями "
+                     f"или разбейте перебивкой.")
     return Joint(50, "ДОПУСТИМО",
                  f"Резкий перепад ({a.plan} -> {b.plan}): зритель может потерять связь. "
-                 f"Допустимо только как адресный переход (дальний->действие) или акцент. Лучше идти ступенями.")
+                 f"Допустимо только как адресный переход (дальний->действие) или акцент. "
+                 f"Лучше идти ступенями.")
 
 
 # Рекомендуемые длительности для дайджеста (сек) — из config/settings.json
@@ -184,6 +191,13 @@ DURATION_TOLERANCE = float(settings.get("digest.duration_over_tolerance_sec", 2.
 
 # Сколько одинаковых планов подряд — уже монотонно и пора бить перебивкой
 MAX_SAME_PLAN_RUN = int(settings.get("digest.max_same_plan_run", 3))
+
+# Насколько резко можно переходить между крупностями. По стандарту
+# медиацентра (слайд «Монтаж по крупности») скачок не должен быть большим,
+# и соединение близкой детали с дальним видом названо негармоничным. На
+# шкале Кулешова это разница 4, поэтому порог 3: всё, что прыгает
+# дальше, попадает в отчёт как проблема, а не как «допустимо».
+MAX_SCALE_JUMP = int(settings.get("digest.max_scale_jump", 3))
 
 # Порядок перебора всегда детерминирован: один и тот же CSV даёт одну и ту же рыбу
 ORDER_SEED = int(settings.get("digest.order_seed", 42))
@@ -544,10 +558,10 @@ def main(argv=None):
     ap.add_argument("--auto", action="store_true", help="авто-подобрать лучший порядок")
     ap.add_argument("--demo", choices=["digest", "interview"], help="запустить на встроенном примере")
     ap.add_argument("--out", help="сохранить таймлайн в CSV")
-    ap.add_argument("--target-sec", type=float, default=0,
-                    help="шаблон дайджеста: ужать набор под хронометраж (напр. 60). "
-                         "0 = не ужимать. Умолчание намеренно 0, а не из конфига: "
-                         "иначе запуск без флага молча выкинул бы куски")
+    ap.add_argument("--target-sec", type=float, default=None,
+                    help="шаблон дайджеста: ужать набор под хронометраж. "
+                         "Пусто — берётся digest.target_sec (по стандарту "
+                         "медиацентра 120с), 0 = не ужимать")
     ap.add_argument("--finale-wide", action="store_true",
                     default=bool(settings.get("digest.digest_finale_wide", True)),
                     help="шаблон дайджеста: финал обязательно общим/дальним")
@@ -583,13 +597,16 @@ def main(argv=None):
 
     if args.auto or args.demo:
         ordered = suggest_order(clips, mode=mode)
-        # пул перебивок = детали + герои, которых нет в проблемном стыке
+        # pool перебивок = детали + герои, которых нет в проблемном стыке
         pool = [c for c in clips if c.plan == "деталь"]
         fixed, notes = fix_with_cutaways(ordered, pool)
         notes = list(notes)
-        if args.target_sec:
+        target = args.target_sec
+        if target is None:
+            target = float(settings.get("digest.target_sec", 0) or 0)
+        if target:
             # сначала урезка (открывающий кадр защищён), потом финал из выживших
-            fixed, drop_notes = fit_target(fixed, args.target_sec)
+            fixed, drop_notes = fit_target(fixed, target)
             notes.extend(drop_notes)
         if args.finale_wide:
             fixed, msg = enforce_finale(fixed, mode=mode)
