@@ -39,7 +39,9 @@ import bootstrap            # noqa: E402,F401
 import settings             # noqa: E402
 
 import interview            # noqa: E402
+import speech               # noqa: E402
 from ml import sorter       # noqa: E402
+from ml import theme        # noqa: E402
 
 
 DIGEST_PREFIX = "digest"
@@ -86,200 +88,204 @@ def videos(folder: Path):
 # ---------------------------------------------------------------- речь
 
 
-# ---- модель и кеш распознавания ----
-_MODELS = {}
+# Граница фразы. Замер на готовом дайджесте: куски интервью там и стоят
+# там, где кончилась фраза, а не там, где кончился кусок.
+PHRASE_GAP = 0.45
+MAX_PIECE = 4.5
+MIN_PIECE = 1.2
 
 
-def get_model(model_name: str, device: str):
-    """Модель whisper один раз на прогон.
+def phrase_pieces(words, max_piece=MAX_PIECE, min_piece=MIN_PIECE,
+                  limit_sec=None):
+    """Слова -> куски ролика, разрезанные по границам фраз.
 
-    `speak_chunks` зовётся на каждом дубле стендапа и на каждом спикере:
-    если грузить модель каждый раз, блок проводит минуты в загрузке весов
-    между файлами. Модель тяжёлая, держим одну на прогон.
+    Куски режутся не по таймеру, а там, где кончилась фраза: обрыв
+    посередине фразы зритель слышит, и монтаж выдаёт себя. Границы фразы
+    — пауза длиннее PHRASE_GAP или конец предложения по знаку.
+
+    Фраза длиннее max_piece режется ровно: длинную мысль всё равно не
+    вырезать посередине, а в эфире её читают в темп. Текст каждого
+    куска соответствует именно этому куску, а не всей фразе: в плане
+    монтажёр видит, что именно здесь говорят.
     """
-    key = (model_name, device)
-    if key not in _MODELS:
-        _MODELS[key] = interview.make_model(model_name, device)
-    return _MODELS[key]
+    if not words:
+        return []
+    groups = []
+    cur = []
+    prev_end = None
+    prev_ends_sentence = False
+    for w, t0, t1 in words:
+        if prev_end is not None:
+            gap = t0 - prev_end
+            # Новая фраза начинается после паузы или после слова, которое
+            # закончило предложение. Знак смотрим у ПРЕДЫДУЩЕГО слова:
+            # иначе «четыре.» уезжало бы в следующий кусок и фраза
+            # «раз два три четыре» рассыпалась.
+            if gap > PHRASE_GAP or prev_ends_sentence:
+                # Граничное слово начинает СЛЕДУЮЩУЮ группу. Если
+                # закрыть им текущую, кусок растянется на паузу и
+                # следующий начнётся с её середины.
+                if cur:
+                    groups.append(cur)
+                cur = [(w, t0, t1)]
+            else:
+                cur.append((w, t0, t1))
+        else:
+            cur.append((w, t0, t1))
+        prev_ends_sentence = w.endswith((".", "!", "?", "…"))
+        prev_end = t1
+    if cur:
+        groups.append(cur)
+
+    # Короткие фразы приклеиваем к предыдущей: обрыв в одно слово —
+    # это не фраза, а обрывок. Запас 0.05с — из-за float-шума фраза
+    # ровно в 1.2с считалась короткой (1.1999999999999997 < 1.2) и
+    # склеивалась обратно.
+    merged = []
+    for g in groups:
+        span = g[-1][2] - g[0][1]
+        if merged and span < min_piece - 0.05:
+            merged[-1] = merged[-1] + g
+        else:
+            merged.append(list(g))
+    groups = [g for g in merged if g[-1][2] - g[0][1] >= 0.8]
+
+    # Предел длины применяем ПОСЛЕ склейки. Склейка коротких кусков
+    # давала куски по 11 секунд, и интервью не добирало свою долю
+    # хронометража: вместо трёх кусков по четыре секунды выходил один
+    # на одиннадцать.
+    pieces = []
+    for g in groups:
+        start = g[0][1]
+        chunk = []
+        for wd in g:
+            if chunk and wd[2] - start > max_piece:
+                pieces.append((start, chunk[-1][2], chunk))
+                start = chunk[-1][2]
+                chunk = []
+            chunk.append(wd)
+        if chunk:
+            pieces.append((start, chunk[-1][2], chunk))
+
+    out = []
+    for a, b, chunk in pieces:
+        if b - a < 0.8:
+            # Обрывок меньше секунды в таймлайне — вспышка. Монтажёр
+            # такое видит как ошибку, а в ролике это просто мельтешение.
+            continue
+        txt = " ".join(x[0].strip(" ,.;:!?-–—\"«»") for x in chunk)
+        out.append((a, b, txt))
+
+    if limit_sec:
+        keep = []
+        total = 0.0
+        for p in out:
+            if total + (p[1] - p[0]) > limit_sec and keep:
+                break
+            keep.append(p)
+            total += p[1] - p[0]
+        out = keep
+    return out
 
 
-def _src_sig(video: Path):
-    """Подпись исходника: размер и время. Замена файла ломает кеш."""
-    st = video.stat()
-    return [int(st.st_size), int(st.st_mtime)]
-
-
-def load_words(cache: Path, video: Path, model_name: str):
-    """Ранее распознанные слова, либо None, если кеша нет или он чужой.
-
-    Повторный прогон иначе заново гоняет whisper по всем дублям стендапа
-    и спикерам — минуты ради ответа, который уже известен. Кеш безнадёжно
-    устаревает, если сменить модель, поэтому модель входит в ключ.
-    """
-    if not cache.is_file():
-        return None
+def speak_words(video: Path, work: Path, model_name, device):
+    """Слова в файле: [(слово, начало, конец)] либо [], если речи нет."""
     try:
-        data = json.loads(cache.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if data.get("model") != model_name:
-        return None
-    if data.get("src") != _src_sig(video):
-        return None
-    if not isinstance(data.get("words"), list):
-        return None
-    return [interview.Word(w, s, e, p) for w, s, e, p in data["words"]]
-
-
-def save_words(cache: Path, video: Path, model_name: str, words) -> None:
-    """Положить кеш. Пишем через временный файл: обрыв посреди записи
-    оставляет полукорректный JSON, а он тогда просто не прочитается и
-    файл распознается заново — результат не портится."""
-    payload = {"model": model_name, "src": _src_sig(video),
-               "words": [[w.w, w.start, w.end, w.prob] for w in words]}
-    tmp = cache.with_suffix(".tmp")
-    try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False),
-                       encoding="utf-8")
-        tmp.replace(cache)
-    except Exception:
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
-
-
-def speak_chunks(video: Path, work: Path, model, model_name: str,
-                 device: str, max_pause: float, merge_gap: float,
-                 min_keep: float):
-    """Куски чистой речи из одного файла: [(in, out, text)].
-
-    Возвращает None, если файл не дал речи: значит это не тот дубль.
-    """
-    wav = work / (video.stem + "_16k.wav")
-    cache = work / (video.stem + ".tr.json")
-    try:
-        words = load_words(cache, video, model_name)
-        if words is None:
-            if not wav.exists():
-                interview.extract_wav(video, wav)
-            m, dev = get_model(model_name, device)
-            print("  {}: распознаю...".format(video.name))
-            words, _ = interview.transcribe_audio_array(
-                interview.load_mono16(wav), m, video.stem)
-            save_words(cache, video, model_name, words)
-        if not words:
-            return None
-        keeps, _dropped = interview.build_keeps(words, max_pause, merge_gap,
-                                                min_keep)
-        return [(float(i), float(o), t) for i, o, t in keeps if o - i >= 1.0]
+        return speech.words_of(video, work, model_name, device)
     except Exception as e:
-        print("  {}: не разобрать речь ({})".format(video.name, e))
-        return None
+        print("  {}: не разобрать речь ({})".format(video.name, str(e)[:90]))
+        return []
+
+
+def longest_run(words, gap=PHRASE_GAP):
+    """Длиннейший кусок речи без единого разрыва, в секундах.
+
+    Считается по словам: разрыв длиннее gap разрывает кусок. Из
+    этого и выбирается дубль стендапа — в эфир идёт связная речь подряд,
+    и дубль, разбитый на три обрывка по 8 секунд, читается как «человек
+    не знает, что сказать», даже если суммарно он длиннее дубля с одной
+    связной фразой на 30 секунд.
+    """
+    if not words:
+        return 0.0
+    best = cur = 0.0
+    prev_end = None
+    for _w, t0, t1 in words:
+        if prev_end is not None and t0 - prev_end > gap:
+            cur = 0.0
+        cur += (t1 - t0)
+        if prev_end is not None and t0 - prev_end <= gap:
+            cur += (t0 - prev_end)
+        prev_end = t1
+        best = max(best, cur)
+    return best
 
 
 def pick_best_take(candidates):
     """Из дублей стендапа выбрать лучший.
 
-    Критерий — длиннейший НЕПРЕРЫВНЫЙ кусок, а не общая длина и не
-    число кусков. Стендап читают в кадр, и в эфир идёт связная речь
-    подряд. Дубль, разбитый на три обрывка по 8 секунд, читается как
-    «человек не знает, что сказать», даже если суммарно он длиннее
-    дубля с одной связной фразой на 30 секунд. Поэтому сначала смотрим,
-    сколько говорится без единого разрыва, и только потом — сколько
-    всего.
+    candidates: [(файл, слова)].
     """
     best = None
-    for name, chunks in candidates:
-        if not chunks:
+    for name, words in candidates:
+        if not words:
             continue
-        longest = max(o - i for i, o, _ in chunks)
-        total = sum(o - i for i, o, _ in chunks)
-        worst = min(interview.chunk_score(i, o, t) for i, o, t in chunks)
+        longest = longest_run(words)
+        total = sum(t1 - t0 for _w, t0, t1 in words)
+        pieces = phrase_pieces(words)
+        worst = min(interview.chunk_score(i, o, t) for i, o, t in pieces) \
+            if pieces else 0
         rank = (longest, total, -worst)
         if best is None or rank > best[0]:
-            best = (rank, name, chunks, total)
+            best = (rank, name, words, total)
     return best
-
-
-def take_window(chunks, target_sec, min_sec):
-    """Окно из кусков общей длительностью около target_sec.
-
-    Куски не режутся посередине: если фраза кончилась, обрыв виден
-    зрителю. Берём подряд идущие куски и подгоняем по краям.
-    """
-    if not chunks:
-        return None
-    chunks = [(float(c[0]), float(c[1]), str(c[2])) for c in chunks]
-    # Вырезка без длины бесполезна: Premiere получит in==out и пустой кусок.
-    # Мусор лучше пропустить, чем положить в секвенцию.
-    chunks = [(i, o, t) for i, o, t in chunks if o - i >= 1.0]
-    if not chunks:
-        return None
-    chunks.sort(key=lambda c: c[0])
-    if len(chunks) == 1:
-        i, o, txt = chunks[0]
-        want = max(min_sec, min(target_sec, o - i))
-        return (i, min(o, i + want), txt)
-
-    best = None
-    for a in range(len(chunks)):
-        for b in range(a, len(chunks)):
-            span = chunks[b][1] - chunks[a][0]
-            if span > target_sec * 1.35 and b > a:
-                break
-            if span < min_sec:
-                continue
-            score = abs(span - target_sec)
-            if best is None or score < best[0]:
-                best = (score, a, b, span)
-    if best is None:
-        return None
-    _, a, b, _ = best
-    return (chunks[a][0], chunks[b][1],
-            " ".join(c[2] for c in chunks[a:b + 1]))
 
 
 def process_standup(folder: Path, work: Path, model_name, device, log,
                     budget=None):
-    """Лучший дубль стендапа -> (файл, in, out, текст) либо None."""
+    """Лучший дубль стендапа -> [(файл, in, out, текст)].
+
+    Куски режутся по границам фраз: стендап читают в кадр, и обрыв
+    посередине фразы слышно.
+    """
     files = videos(folder)
     if not files:
-        return None
+        return []
     target = float(cfg("standup_target_sec", 30.0))
-    floor = float(cfg("standup_min_sec", 12.0))
     if budget:
-        # Не дать стендапу съесть больше четверти: он голос, а не весь ролик.
+        # Не дать стендапу съесть больше своей доли: он голос, а не
+        # весь ролик.
         target = min(target, budget)
-        floor = min(floor, budget)
-    max_pause = float(settings.get("interview.max_pause_sec", 0.6))
-    merge_gap = float(settings.get("interview.merge_gap_sec", 1.2))
-    min_keep = float(settings.get("interview.min_keep_sec", 1.5))
 
     log("Стенап: дублей {}".format(len(files)))
     cands = []
     for p in files:
-        ch = speak_chunks(p, work, None, model_name, device,
-                          max_pause, merge_gap, min_keep)
-        if ch:
-            cands.append((p, ch))
+        words = speak_words(p, work, model_name, device)
+        if words:
+            cands.append((p, words))
     best = pick_best_take(cands)
     if not best:
         log("Стенап: ни один дубль не дал разборчивой речи")
-        return None
-    _rank, path, chunks, total = best
-    win = take_window(chunks, target, floor)
-    if not win:
-        return None
-    i, o, text = win
-    log("Стенап: {} из {} дублей, речи {:.0f}с, берём {:.0f}-{:.0f}с"
-        .format(path.name, len(files), total, i, o))
-    return (path, i, o, text)
+        return []
+    _rank, path, words, total = best
+    pieces = phrase_pieces(words, limit_sec=target)
+    if not pieces:
+        log("Стенап: речь не разбилась на фразы")
+        return []
+    log("Стенап: {} из {} дублей, речи {:.0f}с, берём {} кусков по фразам"
+        .format(path.name, len(files), total, len(pieces)))
+    return [(path, i, o, t) for i, o, t in pieces]
 
 
 def process_interviews(folder: Path, work: Path, model_name, device, log,
                        budget=None):
-    """По одному ответу на каждого спикера -> [(файл, in, out, текст)]."""
+    """Ответы спикеров, нарезанные по фразам.
+
+    Возвращает [(файл, [(in, out, текст), ...])] — по спикеру один
+    список кусков. Редактор режет интервью по границам фраз: кусок
+    «На решение отводится час» (1.16 с) стоит отдельно и не
+    обрезается посередине. Поэтому кусков много и они короткие.
+    """
     files = videos(folder)
     if not files:
         return []
@@ -288,27 +294,19 @@ def process_interviews(folder: Path, work: Path, model_name, device, log,
         # На всех спикеров делим остаток поровну, но не меньше половины
         # ответа: обрезанный на 5с ответ в эфире не читается.
         per = max(per * 0.5, min(per, budget / len(files)))
-    target = per
-    max_pause = float(settings.get("interview.max_pause_sec", 0.6))
-    merge_gap = float(settings.get("interview.merge_gap_sec", 1.2))
-    min_keep = float(settings.get("interview.min_keep_sec", 1.5))
     log("Интервью: спикеров {}".format(len(files)))
     out = []
     for p in files:
-        ch = speak_chunks(p, work, None, model_name, device,
-                          max_pause, merge_gap, min_keep)
-        if not ch:
+        words = speak_words(p, work, model_name, device)
+        if not words:
             log("  {}: речи нет, пропускаю".format(p.name))
             continue
-        chunks = sorted(ch, key=lambda c: c[0])
-        # ответ должен быть ЗАВЕРШЁННЫМ: берём куски подряд, а не один
-        # обрывок. Стандарт — 15 секунд, это две-три фразы.
-        win = take_window(chunks, target, target * 0.6)
-        if not win:
+        pieces = phrase_pieces(words, limit_sec=per)
+        if not pieces:
             continue
-        i, o, text = win
-        log("  {}: {:.0f}-{:.0f}с ({:.0f}с)".format(p.name, i, o, o - i))
-        out.append((p, i, o, text))
+        log("  {}: {} кусков по фразам, {:.0f}с".format(
+            p.name, len(pieces), sum(o - i for i, o, _t in pieces)))
+        out.append((p, pieces))
     return out
 
 
@@ -359,6 +357,89 @@ def broll_csv(folder: Path, out_csv: Path, log, device="auto",
     return out_csv
 
 
+# Длина вырезки из клипа нарезки. Замер на готовом дайджесте: редактор
+# ставил куски по 1.2-2.6 с, а сами клипы по 5-13 с. Кусок нарезки в
+# ролике — это НЕ клип целиком, а короткая вырезка из него.
+BROLL_PIECE_MIN = 1.2
+BROLL_PIECE_MAX = 3.0
+
+
+def pick_excerpt(words, dur, want=BROLL_PIECE_MAX):
+    """Где в клипе взять вырезку: там, где в кадре говорят.
+
+    В микрофон нарезки попали слова с мероприятия, и в те моменты, где
+    что-то говорили, кадр содержательный. В тишине берём середину
+    клипа: выбирать нечего, а середина обычно чище краёв.
+    """
+    if dur <= want:
+        return (0.0, float(dur))
+    if words:
+        best = None
+        for i, (_w, t0, _t1) in enumerate(words):
+            j = i
+            while j + 1 < len(words) and words[j + 1][1] - words[i][1] < want:
+                j += 1
+            span = words[j][2] - words[i][1]
+            if best is None or span > best[0]:
+                best = (span, words[i][1], words[j][2])
+        if best:
+            return (max(0.0, best[1]), min(float(dur), best[2]))
+    mid = dur / 2.0
+    return (max(0.0, mid - want / 2.0), min(float(dur), mid + want / 2.0))
+
+
+def broll_segments(folder: Path, labels, log, keep=None, plans=None,
+                   piece_min=BROLL_PIECE_MIN, piece_max=BROLL_PIECE_MAX):
+    """Клипы нарезки -> короткие вырезки [(файл, in, out, подпись, план)].
+
+    Каждый клип даёт одну вырезку: повторять один и тот же кадр дважды
+    подряд — плохо, а резать клип на три куска тоже нельзя, монтажёр
+    потом не найдёт, откуда кусок.
+
+    `keep` — клипы, прошедшие отсев мыла и тряски (список из detect.py).
+    `plans` — крупность и кто в кадре: по ним отбираются кадры, чтобы
+    подряд не шло три одинаковых плана.
+    """
+    out = []
+    for p in videos(folder):
+        if keep is not None and p.name not in keep:
+            continue
+        lab = labels.get(p.name) or {}
+        words = lab.get("words") or []
+        dur = float(lab.get("dur") or 0.0)
+        if not dur:
+            dur = clip_duration(p)
+        if dur < piece_min:
+            continue
+        a, b = pick_excerpt(words, dur, piece_max)
+        if b - a < min(piece_min, dur):
+            a, b = 0.0, dur
+        if b - a > piece_max:
+            b = a + piece_max
+        text = (lab.get("text") or "").strip()
+        if not text:
+            # Клип без речи: темы у него нет, и монтажёр должен видеть
+            # это в плане, а не гадать, почему описание пустое.
+            text = "(без речи)"
+        plan = hero = ""
+        if plans and p.name in plans:
+            plan, hero = plans[p.name]
+        out.append((p, a, b, text, plan, hero))
+    return out
+
+
+def clip_duration(path: Path) -> float:
+    """Длительность клипа в секундах."""
+    import subprocess
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+
 # ---------------------------------------------------------------- сборка
 
 
@@ -376,11 +457,6 @@ DETECT_KEYS = (
     "detect.person_h_inframe_min", "detect.person_h_fragment",
     "detect.person_h_single_point", "detect.person_h_face_only",
     "detect.model", "sharp.enabled", "sharp.floor_factor", "sharp.shake_max",
-)
-ORDER_KEYS = (
-    "digest.rec_duration_sec", "digest.duration_over_tolerance_sec",
-    "digest.max_same_plan_run", "digest.max_scale_jump", "digest.order_seed",
-    "digest.two_opt_iterations", "digest.digest_finale_wide",
 )
 
 
@@ -449,61 +525,194 @@ def write_plan(rows, out_csv: Path, base: Path):
     return out_csv
 
 
-def run_autocut(broll_csv: Path, order_csv: Path, target_sec: float, log,
-                device="auto"):
-    """Порядок нарезки по крупности — это работа autocut.
-
-    Свою раскладку не пишем: score_joint, fix_with_cutaways, fit_target и
-    enforce_finale в autocut уже отлажены и покрыты тестами. Дублировать
-    их здесь — значит завести две правды, которые разъедутся.
-    """
-    import subprocess
-    key = {"v": 1, "target": float(target_sec), "mode": "digest",
-           "broll": hashlib.sha1(broll_csv.read_bytes()).hexdigest(),
-           "cfg": settings_sig(ORDER_KEYS)}
-    if is_fresh(order_csv, key):
-        log("Нарезка: порядок не изменился, беру готовый")
-        return order_csv
-    cmd = [sys.executable, "-m", "src.modes.autocut", "--csv", str(broll_csv),
-           "--mode", "digest", "--auto", "--out", str(order_csv),
-           "--target-sec", str(target_sec), "--device", device]
-    log("Нарезка: подбираю порядок под {:.0f}с".format(target_sec))
-    r = subprocess.run(cmd, cwd=str(SRC.parent), capture_output=True,
-                       text=True, encoding="utf-8", errors="replace")
-    if r.returncode != 0:
-        log("Нарезка: autocut упал (код {})".format(r.returncode))
-        for line in (r.stderr or r.stdout or "").splitlines()[-6:]:
-            log("   " + line)
-        return None
-    try:
-        with order_csv.open(encoding="utf-8") as f:
-            n = len(list(csv.DictReader(f)))
-    except Exception:
-        n = 0
-    log("Нарезка: в порядке кадров {}".format(n))
-    mark_fresh(order_csv, key)
-    return order_csv
+# Доля хронометража под нарезку. Замер на готовом дайджесте: стендап
+# 21.7с, нарезка 25.2с, интервью 54с из 101.7 — примерно 22/25/53.
+SHARE_STANDUP = 0.22
+SHARE_BROLL = 0.25
 
 
-def read_order(order_csv: Path, broll_dir: Path):
-    """Строки нарезки -> [(part, файл, in, out, описание)].
+def build_digest(standup, broll, interviews, labels, weights, log,
+                 target):
+    """Рыба дайджеста по рецепту редактора.
 
-    Кусок нарезки берётся целиком, поэтому in=0, out=длительность.
+    standup: [(файл, in, out, текст)] — куски лучшего дубля.
+    broll: [(файл, in, out, подпись, план, кто в кадре)].
+    interviews: [(файл, [(in, out, текст)])] — куски по фразам.
+
+    Порядок секвенции: стендап -> нарезка-подводка -> интервью с
+    нарезкой-вставками -> нарезка-финал.
+
+    Нарезка-вставка ставится под речь по теме: тема клипа взята из его
+    СОБСТВЕННОГО звука (голос с мероприятия попал в микрофон камеры).
+    Это черновик, а не решение: монтажёр правит его в панели разбора.
     """
     rows = []
-    with order_csv.open(encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            name = (r.get("file") or "").strip()
-            if not name:
+    used = set()
+    st_budget = target * SHARE_STANDUP
+    nar_budget = target * SHARE_BROLL
+    iv_budget = target - st_budget - nar_budget
+
+    def take_broll(seg):
+        path, a, b, text, _plan, _hero = seg
+        used.add(path.name)
+        return ("нарезка", path, a, b, text[:140])
+
+    def varied(history, seg):
+        """Не больше двух подряд одной пары (крупность, кто в кадре).
+
+        Замер на готовом ролике: редактор чередовал общий, средний и
+        крупный, и три одинаковых подряд не шло ни разу. Ряд из трёх
+        похожих кадров монтажёр видит как «монтаж не сделан».
+        """
+        _p, _a, _b, _t, plan, hero = seg
+        if not plan and not hero:
+            return True
+        same = [h for h in history[-2:] if h == (plan, hero)]
+        return len(same) < 2
+
+    nar_spent = [0.0]
+
+    def pick_block(rows_out, budget, history):
+        """Блок нарезки: короткие вырезки подряд.
+
+        Два правила. Первое — не больше двух подряд одной пары
+        (крупность, кто в кадре). Второе — не идти подряд по соседним
+        номерам файлов: нумерация камеры идёт по порядку съёмки, и
+        C0011, C0012, C0013 — это один и тот же объект, три раунда подряд
+        не показывают.
+        """
+        spent = 0.0
+        for seg in broll:
+            if spent >= budget or nar_spent[0] >= nar_budget:
+                break
+            if seg[0].name in used or not varied(history, seg):
                 continue
-            try:
-                dur = float((r.get("duration") or "0").replace(",", "."))
-            except ValueError:
-                dur = 0.0
-            path = broll_dir / name
-            rows.append(("нарезка", path, 0.0, dur,
-                         (r.get("desc") or "").strip()))
+            if history and abs(clip_number(seg[0].name)
+                               - clip_number(last_name[0])) <= 3:
+                continue
+            rows_out.append(take_broll(seg))
+            last_name[0] = seg[0].name
+            history.append((seg[4], seg[5]))
+            dur = seg[2] - seg[1]
+            spent += dur
+            nar_spent[0] += dur
+        return spent
+
+    last_name = [""]
+
+    # ---- стендап: голос в кадр, спереди ----
+    spent = 0.0
+    for path, i, o, text in standup:
+        if spent + (o - i) > st_budget and rows:
+            break
+        rows.append(("стендап", path, i, o, text[:200]))
+        spent += o - i
+
+    # ---- нарезка-подводка: короткий блок в начале ----
+    history = []
+    block = nar_budget * 0.30
+    pick_block(rows, block, history)
+
+    # ---- интервью: куски по фразам, между ними нарезка-вставки ----
+    per = iv_budget / max(1, len(interviews))
+    for n, (path, pieces) in enumerate(interviews):
+        if n:
+            # Блок нарезки между интервью: редактор так и делал — между
+            # ответами шла тематическая подборка, и это «пауза» в речи.
+            pick_block(rows, block, history)
+        left = per
+        first = True
+        for i, o, text in pieces:
+            if left <= 0:
+                break
+            if not first:
+                # Вставка между кусками: тема берётся из текста куска,
+                # клип — по совпадению темы со звуком нарезки. Вставка
+                # идёт в счёт доли НАРЕЗКИ, а не в счёт ответа
+                # спикера: иначе интервью съедалось вставками.
+                if nar_spent[0] < nar_budget:
+                    best = theme.best_matches(text, labels, weights,
+                                              exclude=used, limit=1)
+                    if best:
+                        seg = broll_by_name(broll, best[0][0])
+                        if seg:
+                            rows.append(take_broll(seg))
+                            nar_spent[0] += seg[2] - seg[1]
+            rows.append(("интервью", path, i, o, text[:200]))
+            left -= (o - i)
+            first = False
+
+    # ---- добор нарезкой: до потолка хронометража ----
+    pick_block(rows, nar_budget, history)
     return rows
+
+
+def clip_number(name):
+    """Номер клипа по имени: C0028 -> 28, FX20020 -> 20020.
+
+    Нумерация камеры идёт по порядку съёмки, поэтому соседние номера —
+    это один и тот же объект. На этом строится правило «не идти подряд
+    по соседним файлам».
+
+    Расширение отбрасывается: иначе в номер попадают цифры из `.MP4`
+    и C0028.MP4 превращался в 284.
+    """
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    digits = "".join(ch for ch in stem if ch.isdigit())
+    return int(digits) if digits else 0
+
+
+def write_shelf(broll, labels, plans, rows, out_csv: Path):
+    """Полка для монтажёра: все клипы нарезки с подписями.
+
+    Человек тратит на отсмотр материала 2-3 часа. Открывать 110 файлов
+    подряд — это и есть эти часы. Здесь всё в одной таблице: что в
+    клипе, кто в кадре, сколько длится, куда попал в рыбу.
+
+    `rows` — собранная рыба, чтобы отметить, что уже использовано.
+    """
+    used = {}
+    for part, path, a, b, _desc in rows:
+        if part == "нарезка":
+            used[path.name] = "{:.1f}-{:.1f}".format(a, b)
+    with out_csv.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["файл", "в рыбе", "in", "out", "крупность", "кто в кадре",
+                    "тема (из звука клипа)", "длительность"])
+        for path, a, b, text, plan, hero in broll:
+            lab = labels.get(path.name) or {}
+            dur = float(lab.get("dur") or 0.0)
+            w.writerow([path.name, used.get(path.name, ""),
+                        "{:.1f}".format(a), "{:.1f}".format(b),
+                        plan, hero, text or "(без речи)",
+                        "{:.1f}".format(dur)])
+    return out_csv
+
+
+def read_plans(broll_csv: Path):
+    """Что detect.py насчитал: {файл: (крупность, кто в кадре)}.
+
+    Пустой set означает «отсева не было, берём всё»: так честнее, чем
+    молча выкинуть нарезку, если разбор не удался.
+    """
+    plans = {}
+    try:
+        with broll_csv.open(encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                name = (r.get("file") or "").strip()
+                if name:
+                    plans[name] = ((r.get("plan") or "").strip(),
+                                   (r.get("hero") or "").strip())
+    except Exception:
+        return set(), {}
+    return set(plans.keys()), plans
+
+
+def broll_by_name(broll, name):
+    for seg in broll:
+        if seg[0].name == name:
+            return seg
+    return None
 
 
 def main(argv=None) -> int:
@@ -552,54 +761,60 @@ def main(argv=None) -> int:
     target = args.target_sec
     if target is None:
         target = float(settings.get("digest.target_sec", 120) or 120)
-    # Бюджет делится на три части. Нарезка — середина ролика и берёт
-    # половину: стендап и интервью это голос, нарезка — то, о чём он
-    # говорит. Стандарт (слайд 2) ограничивает только общий хронометраж.
-    st_budget = target * 0.25
-    iv_budget = target * 0.25
-    nar_budget = target - st_budget - iv_budget
-    log("Хронометраж {:.0f}с: стендап {:.0f}, нарезка {:.0f}, интервью {:.0f}"
-        .format(target, st_budget, nar_budget, iv_budget))
 
-    # ---- стендап: один лучший дубль, спереди ----
-    front = []
-    st = process_standup(parts["standup"], work, args.model, args.device, log,
-                         budget=st_budget)
-    if st:
-        front.append(st)
-    else:
-        log("Стенап: не собрался, ролик начнётся с нарезки")
+    # ---- темы нарезки: из её собственного звука ----
+    log("Нарезка: подписываю клипы по их звуку")
+    labels = theme.label_pool(parts["broll"], work, args.model, args.device,
+                               log)
+    for name in labels:
+        labels[name]["dur"] = clip_duration(parts["broll"] / name)
+    weights = theme.idf(labels)
+    voiced = len([n for n in labels if theme.content_words(
+        labels[n].get("text", ""))])
+    log("Нарезка: подписано {} клипов, из них с речью {}".format(
+        len(labels), voiced))
 
-    # ---- нарезка: существующий detect + autocut ----
-    middle = []
+    # ---- стендап: один лучший дубль, нарезанный по фразам ----
+    st_budget = target * SHARE_STANDUP
+    front = process_standup(parts["standup"], work, args.model, args.device, log,
+                            budget=st_budget)
+
+    # ---- нарезка: короткие вырезки из отобранных клипов ----
+    # autocut здесь не участвует: он подбирает клипы под БЮДЖЕТ хронометража,
+    # а в дайджесте нужны короткие вырезки из всех годных клипов. Нарезка
+    # в готовом ролике — это 33 куска по 1.2-2.6 с из 28 разных файлов, а
+    # не два клипа по 15 с.
     b_path = work / "broll.csv"
-    order_csv = work / "nar_order.csv"
+    broll = []
+    keep, plans = read_plans(b_path)
     if broll_csv(parts["broll"], b_path, log, args.device):
-        if run_autocut(b_path, order_csv, nar_budget, log, args.device):
-            middle = read_order(order_csv, parts["broll"])
+        keep, plans = read_plans(b_path)
+        broll = broll_segments(parts["broll"], labels, log, keep=keep,
+                               plans=plans)
+    log("Нарезка: вырезок {}".format(len(broll)))
 
-    # ---- интервью: по 15с на спикера, в конце ----
+    # ---- интервью: куски по фразам ----
+    iv_budget = target - target * SHARE_STANDUP - target * SHARE_BROLL
     back = process_interviews(parts["interview"], work, args.model, args.device,
                               log, budget=iv_budget)
 
-    # ---- порядок секвенции: стендап -> нарезка -> интервью ----
-    rows = []
-    for path, i, o, text in front:
-        rows.append(("стендап", path, i, o, text[:200]))
-    rows.extend(middle)
-    for path, i, o, text in back:
-        rows.append(("интервью", path, i, o, text[:200]))
+    rows = build_digest(front, broll, back, labels, weights, log, target)
 
     if not rows:
         print("Собрать нечего: все три части пустые.")
         return 1
 
     plan = write_plan(rows, out_dir / "plan.csv", base)
+    shelf = write_shelf(broll, labels, plans, rows, out_dir / "shelf.csv")
     total = sum(o - i for _p, _f, i, o, _d in rows)
     log("\nПлан: " + str(plan))
+    log("Полка для монтажёра: " + str(shelf))
     log("Кусов: {} (стендап {}, нарезка {}, интервью {})".format(
-        len(rows), len(front), len(middle), len(back)))
-    log("Хронометраж: {:.1f}с (цель {:.0f}с)".format(total, target))
+        len(rows),
+        len([r for r in rows if r[0] == "стендап"]),
+        len([r for r in rows if r[0] == "нарезка"]),
+        len([r for r in rows if r[0] == "интервью"])))
+    log("Хронометраж: {:.1f}с (потолок {:.0f}с)".format(total, target))
     if total > target:
         log("  ПРЕВЫШЕНИЕ на {:.1f}с".format(total - target))
     return 0

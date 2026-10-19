@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "src" / "modes"))
 import bootstrap  # noqa: F401,F403
 
 import sorter as SO        # noqa: E402
+import speech as SP        # noqa: E402
 import digest as DG        # noqa: E402
 
 fail = []
@@ -88,39 +89,171 @@ ok("порог стендапа ниже минимума стендапа",
 ok("нарезка короче порога стендапа",
    10.6 < TH["standup_min_sec"], "")
 
-# --- окно речи: берём подряд идущие куски, а не один обрывок ---
-one = DG.take_window([(0.0, 10.0, "фраза")], 30, 12)
-ok("единственный кусок берётся целиком", one is not None and one[1] > one[0], str(one))
-
-two = DG.take_window([(0.0, 12.0, "раз"), (13.0, 25.0, "два")], 30, 12)
-ok("два куска склеиваются, если цель не достигнута одним",
-   two is not None and two[1] - two[0] > 20, str(two and (two[0], two[1])))
-
-short_target = DG.take_window([(0.0, 12.0, "раз"), (13.0, 25.0, "два")], 15, 9)
-ok("под короткую цель берётся один кусок",
-   short_target is not None and short_target[1] - short_target[0] <= 15,
-   str(short_target and (short_target[0], short_target[1])))
-
-long_one = DG.take_window([(0.0, 60.0, "долго")], 30, 12)
-ok("длинный кусок обрезается до цели",
-   long_one is not None and abs((long_one[1] - long_one[0]) - 30) < 1,
-   str(long_one and (long_one[1] - long_one[0])))
-
-ok("пустые куски дают None", DG.take_window([], 30, 12) is None, "")
-ok("мусор out<=in отбрасывается", DG.take_window([(0.0, 0.0, "пусто")], 30, 12) is None, "")
-
 # --- выбор лучшего дубля стендапа: длинее != лучше ---
-takes = [
-    ("длинный_но_рваный", [(0.0, 8.0, "а"), (30.0, 38.0, "б"), (60.0, 68.0, "в")]),
-    ("короткий_но_связный", [(0.0, 30.0, "полный связный текст")]),
+def _words(spans):
+    """Слова из отрезков (начало, конец): по одному слову на отрезок."""
+    out = []
+    for i, (a, b) in enumerate(spans):
+        out.append(("с{}".format(i), float(a), float(b)))
+    return out
+
+
+# рваный: три фрагмента по 8 секунд с большими паузами между ними
+_takes = [
+    ("длинный_но_рваный", _words(
+        [(0, 4), (4, 8), (30, 34), (34, 38), (60, 64), (64, 68)])),
+    # связный: одна непрерывная фраза на 30 секунд
+    ("короткий_но_связный", _words(
+        [(0, 3), (3, 6), (6, 9), (9, 12), (12, 15), (15, 18), (18, 21),
+         (21, 24), (24, 27), (27, 30)])),
 ]
-best = DG.pick_best_take(takes)
+best = DG.pick_best_take(_takes)
 ok("выбирается связный дубль, а не самый длинный",
    best is not None and best[1] == "короткий_но_связный",
    best and best[1])
 ok("из пустых дублей ничего не выберется",
-   DG.pick_best_take([("пусто", None)]) is None, "")
+   DG.pick_best_take([("пусто", [])]) is None, "")
 ok("пустой набор не роняет выбор", DG.pick_best_take([]) is None, "")
+ok("длиннейший непрерывный кусок считается по словам",
+   abs(DG.longest_run(_takes[1][1]) - 30.0) < 0.5,
+   str(DG.longest_run(_takes[1][1])))
+ok("рваный дубль даёт короткий непрерывный кусок",
+   DG.longest_run(_takes[0][1]) < 9.0, str(DG.longest_run(_takes[0][1])))
+
+# --- куски режутся по границам фраз ---
+# Редактор режет интервью там, где кончилась фраза: кусок «На решение
+# отводится час» (1.16с) стоит отдельно, а не обрезается посередине.
+_phrase = _words([(0, 0.5), (0.5, 1.0),          # «У нас контрольная»
+                   (1.0, 1.5), (1.5, 2.0),        # «...проводится»
+                   (4.0, 4.6), (4.6, 5.2),        # пауза 2с -> граница
+                   (5.2, 5.8), (5.8, 6.4)])
+_pieces = DG.phrase_pieces(_phrase)
+ok("речь режется по границам фраз", len(_pieces) >= 2, str(_pieces))
+ok("кусок не пересекает паузу",
+   all(abs(p[1] - q[0]) > 1.0 for p, q in zip(_pieces, _pieces[1:])),
+   str([(round(p[0], 1), round(p[1], 1)) for p in _pieces]))
+ok("пустая речь не даёт кусков", DG.phrase_pieces([]) == [], "")
+
+# --- вырезка из клипа нарезки берётся там, где говорят ---
+_ex = DG.pick_excerpt(_words([(0, 0.4), (0.5, 0.9), (1.0, 1.4)]), 20.0, 3.0)
+ok("вырезка короткая", _ex[1] - _ex[0] <= 3.5, str(_ex))
+ok("вырезка взята с говорящего места", _ex[0] < 2.0, str(_ex))
+_silent = DG.pick_excerpt([], 20.0, 3.0)
+ok("в тишине берётся середина клипа",
+   abs(_silent[0] - 8.5) < 1.0, str(_silent))
+ok("короткий клип берётся целиком",
+   DG.pick_excerpt([], 2.0, 3.0) == (0.0, 2.0),
+   str(DG.pick_excerpt([], 2.0, 3.0)))
+
+# --- тема клипа из его собственного звука ---
+import theme as THEME  # noqa: E402
+
+_labels = {
+    "C0001.MP4": {"text": "Искусственный интеллект не врет, он выдает вам "
+                           "статистику", "words": []},
+    "C0002.MP4": {"text": "научные опыты физика и химия", "words": []},
+    "C0003.MP4": {"text": "", "words": []},
+}
+_w = THEME.idf(_labels)
+_best = THEME.best_matches("лекция искусственный интеллект и математика",
+                         _labels, _w, limit=1)
+ok("клип про искусственный интеллект подходит под реплику",
+   bool(_best) and _best[0][0] == "C0001.MP4", str(_best))
+ok("пустой звук не подходит ни под что",
+   all(name != "C0003.MP4" for name, _v in
+       THEME.best_matches("любая реплика", _labels, _w, limit=3)), "")
+ok("основы слов совпадают в разных падежах",
+   "математик" in THEME.content_words("математика") and
+   "математик" in THEME.content_words("математике"), "")
+ok("стоп-слова не попадают в значимые",
+   "контроль" not in THEME.content_words("и в на с по что"), "")
+
+# --- границы фраз: и по паузе, и по знаку ---
+# Знак конца предложения сидит в самом слове, как его выдаёт whisper.
+_sent = [("раз", 0.0, 0.4), ("два", 0.4, 0.8), ("три", 0.8, 1.2),
+         ("четыре.", 1.2, 1.6), ("пять", 1.6, 2.2), ("шесть", 2.2, 2.8)]
+_p = DG.phrase_pieces(_sent)
+ok("предложение режется по знаку",
+   len(_p) == 2 and abs(_p[1][0] - 1.6) < 0.01, str(_p))
+ok("кусок не длиннее предела",
+   all(p[1] - p[0] <= DG.MAX_PIECE + 0.01 for p in
+       DG.phrase_pieces(_words([(i * 0.5, i * 0.5 + 0.45)
+                                 for i in range(40)]))), "")
+ok("обрывки короче 0.8с отбрасываются",
+   all(p[1] - p[0] >= 0.8 for p in DG.phrase_pieces(_sent)), str(_p))
+ok("текст куска соответствует именно этому куску",
+   _p[0][2] == "раз два три четыре" and _p[1][2] == "пять шесть", str(_p))
+
+# --- номер клипа по имени ---
+ok("номер камеры читается из имени",
+   DG.clip_number("C0028.MP4") == 28 and
+   DG.clip_number("FX20020.MP4") == 20020,
+   str(DG.clip_number("FX20020.MP4")))
+
+# --- сборка рыбы по рецепту редактора ---
+def _seg(name, plan, hero, text=""):
+    return (_P(name), 0.0, 2.0, text, plan, hero)
+
+
+_labels2 = {
+    "C0010.MP4": {"text": "лекция искусственный интеллект и математика",
+                  "words": []},
+    "C0020.MP4": {"text": "университет открывает двери школьникам",
+                  "words": []},
+    "C0030.MP4": {"text": "", "words": []},
+}
+_weights2 = THEME.idf(_labels2)
+_broll2 = [_seg("C0010.MP4", "крупный", "спикер",
+                "лекция искусственный интеллект и математика"),
+           _seg("C0020.MP4", "общий", "зрители",
+                "университет открывает двери школьникам"),
+           _seg("C0030.MP4", "средний1", "зрители", "(без речи)")]
+_st = [(_P("C0102.MP4"), 0.0, 4.0, "стендап")]
+_iv = [(_P("C0098.MP4"), [(0.0, 3.0, "лекция искусственный интеллект"),
+                           (4.0, 7.0, "университет открывает двери")])]
+_rows = DG.build_digest(_st, _broll2, _iv, _labels2, _weights2, print, 120)
+_parts = [r[0] for r in _rows]
+ok("рыба начинается со стендапа", bool(_parts) and _parts[0] == "стендап",
+   str(_parts))
+ok("в рыбе есть нарезка", "нарезка" in _parts, str(_parts))
+ok("в рыбе есть интервью", "интервью" in _parts, str(_parts))
+ok("интервью идёт после стендапа",
+   _parts.index("интервью") > _parts.index("стендап"), str(_parts))
+ok("вставка подобрана по теме реплики",
+   any(r[0] == "нарезка" and "интеллект" in r[4] for r in _rows),
+   str([(r[0], r[4][:30]) for r in _rows]))
+
+# три подряд одного плана и героя не идёт
+_same = [_seg("C00{:02d}.MP4".format(i), "общий", "зрители")
+         for i in (10, 40, 70)]
+_rows2 = DG.build_digest(_st, _same, [], {}, {}, print, 120)
+_used2 = [r[1].name for r in _rows2 if r[0] == "нарезка"]
+ok("три одинаковых подряд не ставятся",
+   len(_used2) <= 2, str(_used2))
+
+# соседние номера файлов не идут подряд
+_neigh = [_seg("C0011.MP4", "общий", "зрители"),
+          _seg("C0012.MP4", "крупный", "спикер"),
+          _seg("C0013.MP4", "средний1", "участники")]
+_rows3 = DG.build_digest(_st, _neigh, [], {}, {}, print, 120)
+_used = [r[1].name for r in _rows3 if r[0] == "нарезка"]
+_ok = True
+for a, b in zip(_used, _used[1:]):
+    if abs(DG.clip_number(a) - DG.clip_number(b)) <= 3:
+        _ok = False
+ok("соседние номера файлов не идут подряд", _ok, str(_used))
+
+# --- полка для монтажёра ---
+_shelf = _P(tempfile.mkdtemp()) / "shelf.csv"
+DG.write_shelf(_broll2, _labels2, {}, _rows, _shelf)
+_srows = list(csv.DictReader(_shelf.open(encoding="utf-8")))
+ok("полка перечисляет все клипы", len(_srows) == len(_broll2),
+   str(len(_srows)))
+ok("в полке видно, что попало в рыбу",
+   any(r["в рыбе"] for r in _srows), str(_srows[0]))
+ok("в полке есть подпись из звука клипа",
+   any("интеллект" in r["тема (из звука клипа)"] for r in _srows),
+   str(_srows[0]))
 
 # --- части дайджеста: имена папок настраиваются ---
 names = SO.part_names()
@@ -192,18 +325,18 @@ ok("и не голое имя части, из-за которого был reli
 # Без него повторный запуск блока заново гоняет whisper по всем дублям
 # стендапа: минуты ради ответа, который уже известен.
 cache = tmp / "FX20029.tr.json"
-DG.save_words(cache, mov, "medium", [DG.interview.Word("привет", 1.0, 1.5, 0.9)])
-back = DG.load_words(cache, mov, "medium")
+SP.save_words(cache, mov, "medium", [DG.interview.Word("привет", 1.0, 1.5, 0.9)])
+back = SP.load_words(cache, mov, "medium")
 ok("кеш отдаёт те же слова",
    back is not None and len(back) == 1 and back[0].w == "привет"
    and abs(back[0].start - 1.0) < 1e-9, str(back))
 ok("другая модель кеш обесценивает",
-   DG.load_words(cache, mov, "large-v3") is None, "")
+   SP.load_words(cache, mov, "large-v3") is None, "")
 mov.write_bytes(b"\0" * 64)          # тот же путь, другой файл
 ok("подмена исходника обесценивает кеш",
-   DG.load_words(cache, mov, "medium") is None, "")
+   SP.load_words(cache, mov, "medium") is None, "")
 ok("отсутствующий кеш не роняет чтение",
-   DG.load_words(tmp / "нет.json", mov, "medium") is None, "")
+   SP.load_words(tmp / "нет.json", mov, "medium") is None, "")
 
 # --- переиспользование готовых шагов ---
 # Без него каждое «Собрать дайджест» заново разбирает 110 клипов нарезки.
