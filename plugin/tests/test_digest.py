@@ -15,6 +15,10 @@
 неоднозначным и печатается, а не молча угадывается.
 """
 import sys
+import csv
+import io
+import contextlib
+import tempfile
 from pathlib import Path as _P
 
 ROOT = _P(__file__).resolve().parents[1]
@@ -133,6 +137,99 @@ ok("пороги лежат в настройках digest.parts",
 ok("пороги из настроек совпадают с рабочими",
    float(ST.get("digest.parts.interview_min_sec", 0)) == TH["interview_min_sec"],
    "")
+
+# --- материал лежит во вложенной папке ---
+# Окно спрашивает «папка проекта», и человек указывает корень, где рядом
+# со стендап/нарезка/интервью лежат `звк`, `.prproj` и прошлый результат.
+# Сортировщик смотрел только на корень и падал с «в папке нет видео»,
+# хотя материал был — на уровень глубже. Блок целиком вставал на шаге 1.
+tmp = _P(tempfile.mkdtemp())
+(tmp / "исх" / names["standup"]).mkdir(parents=True)
+(tmp / "исх" / names["broll"]).mkdir()
+(tmp / "исх" / names["interview"]).mkdir()
+(tmp / "звк").mkdir()
+(tmp / "проект.prproj").write_bytes(b"x")
+
+src, hint = SO.find_materials(tmp)
+ok("материал найден во вложенной папке",
+   src is not None and src.name == "исх", str(src))
+ok("и об этом сказано, а не угадано молча", bool(hint), str(hint))
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    rc = SO.main(["--input", str(tmp)])
+ok("сортировщик на папке проекта не падает",
+   rc == 0 and "уже разложен" in _buf.getvalue(),
+   "код {}: {}".format(rc, _buf.getvalue()[:100]))
+
+rp = DG.resolve_parts(tmp)
+ok("части дайджеста найдены там же",
+   rp["standup"] is not None and rp["broll"] is not None
+   and rp["interview"] is not None, str(rp))
+
+# прежнее поведение: материал прямо в корне
+tmp_flat = _P(tempfile.mkdtemp())
+(tmp_flat / names["standup"]).mkdir()
+(tmp_flat / names["broll"]).mkdir()
+src2, hint2 = SO.find_materials(tmp_flat)
+ok("материал прямо в корне берётся как есть",
+   src2 == tmp_flat and hint2 is None, "{} {}".format(src2, hint2))
+
+# --- путь в плане считается от папки, которую видит Premiere ---
+# Окно отдаёт Premiere корень проекта как media-dir. Путь считался от
+# папки с частями, и получалось «стендап/файл.mp4», а файл лежит в
+# «исх/стендап/файл.mp4»: Premiere просил relink на каждом клипе.
+mov = tmp / "исх" / names["standup"] / "FX20029.MP4"
+mov.write_bytes(b"\0")
+DG.write_plan([("стендап", mov, 0.0, 10.0, "текст")], tmp / "plan.csv", tmp)
+_row = next(csv.DictReader((tmp / "plan.csv").open(encoding="utf-8")))
+ok("путь в плане — от корня проекта",
+   _row["path"] == "исх/стендап/FX20029.MP4", _row["path"])
+ok("и не голое имя части, из-за которого был relink",
+   _row["path"] != "стендап/FX20029.MP4", _row["path"])
+
+# --- кеш распознавания экономит повторный прогон ---
+# Без него повторный запуск блока заново гоняет whisper по всем дублям
+# стендапа: минуты ради ответа, который уже известен.
+cache = tmp / "FX20029.tr.json"
+DG.save_words(cache, mov, "medium", [DG.interview.Word("привет", 1.0, 1.5, 0.9)])
+back = DG.load_words(cache, mov, "medium")
+ok("кеш отдаёт те же слова",
+   back is not None and len(back) == 1 and back[0].w == "привет"
+   and abs(back[0].start - 1.0) < 1e-9, str(back))
+ok("другая модель кеш обесценивает",
+   DG.load_words(cache, mov, "large-v3") is None, "")
+mov.write_bytes(b"\0" * 64)          # тот же путь, другой файл
+ok("подмена исходника обесценивает кеш",
+   DG.load_words(cache, mov, "medium") is None, "")
+ok("отсутствующий кеш не роняет чтение",
+   DG.load_words(tmp / "нет.json", mov, "medium") is None, "")
+
+# --- переиспользование готовых шагов ---
+# Без него каждое «Собрать дайджест» заново разбирает 110 клипов нарезки.
+# Но переиспользовать чужой результат нельзя: подпись обязана ловить и
+# новый файл, и правку настроек.
+_sig_dir = _P(tempfile.mkdtemp())
+_v1 = _sig_dir / "a.mp4"
+_v1.write_bytes(b"\0" * 10)
+_sig = DG.folder_sig(_sig_dir)
+ok("подпись папки видит файл",
+   list(_sig) == ["a.mp4"] and _sig["a.mp4"][0] == 10, str(_sig))
+
+_cache = _sig_dir / "broll.csv"
+_cache.write_text("file\n", encoding="utf-8")
+_key = {"v": 1, "files": _sig}
+ok("без подписи готовый результат не берётся", not DG.is_fresh(_cache, _key), "")
+DG.mark_fresh(_cache, _key)
+ok("по той же подписи результат переиспользуется", DG.is_fresh(_cache, _key), "")
+ok("другая подпись обесценивает результат",
+   not DG.is_fresh(_cache, {"v": 1, "files": {}}), "")
+_v1.write_bytes(b"\0" * 99)
+ok("изменённый файл обесценивает результат",
+   not DG.is_fresh(_cache, {"v": 1, "files": DG.folder_sig(_sig_dir)}), "")
+ok("настройки входят в подпись",
+   DG.settings_sig(("digest.target_sec",)) ==
+   {"digest.target_sec": ST.get("digest.target_sec")}, "")
 
 print("DIGEST " + ("OK" if not fail else "FAIL " + ", ".join(fail)))
 sys.exit(1 if fail else 0)

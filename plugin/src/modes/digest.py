@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -52,10 +54,26 @@ def cfg(key, default):
 
 
 def resolve_parts(root: Path):
-    """Папки трёх частей. Если материала нет, папка возвращается пустой."""
+    """Папки трёх частей.
+
+    Человек указывает папку проекта, а материалы часто лежат во вложенной
+    (`исх`). Сначала ищем части прямо в корне, если их нет — пробуем
+    один уровень вглубь по тому же правилу, что и сортировщик. Иначе
+    блок падал бы с «нет папок частей» при материале, который рядом.
+    """
     names = sorter.part_names()
-    return {k: (root / names[k] if (root / names[k]).is_dir() else None)
-            for k in ("standup", "broll", "interview")}
+    for base in (root,) + tuple(sorted(
+            [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else [],
+            key=lambda p: p.name)):
+        got = {k: (base / names[k]) for k in ("standup", "broll", "interview")
+               if (base / names[k]).is_dir()}
+        if len(got) >= 2:
+            got.setdefault("standup", None)
+            got.setdefault("broll", None)
+            got.setdefault("interview", None)
+            return {"standup": got.get("standup"), "broll": got.get("broll"),
+                    "interview": got.get("interview")}
+    return {k: None for k in ("standup", "broll", "interview")}
 
 
 def videos(folder: Path):
@@ -68,6 +86,69 @@ def videos(folder: Path):
 # ---------------------------------------------------------------- речь
 
 
+# ---- модель и кеш распознавания ----
+_MODELS = {}
+
+
+def get_model(model_name: str, device: str):
+    """Модель whisper один раз на прогон.
+
+    `speak_chunks` зовётся на каждом дубле стендапа и на каждом спикере:
+    если грузить модель каждый раз, блок проводит минуты в загрузке весов
+    между файлами. Модель тяжёлая, держим одну на прогон.
+    """
+    key = (model_name, device)
+    if key not in _MODELS:
+        _MODELS[key] = interview.make_model(model_name, device)
+    return _MODELS[key]
+
+
+def _src_sig(video: Path):
+    """Подпись исходника: размер и время. Замена файла ломает кеш."""
+    st = video.stat()
+    return [int(st.st_size), int(st.st_mtime)]
+
+
+def load_words(cache: Path, video: Path, model_name: str):
+    """Ранее распознанные слова, либо None, если кеша нет или он чужой.
+
+    Повторный прогон иначе заново гоняет whisper по всем дублям стендапа
+    и спикерам — минуты ради ответа, который уже известен. Кеш безнадёжно
+    устаревает, если сменить модель, поэтому модель входит в ключ.
+    """
+    if not cache.is_file():
+        return None
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if data.get("model") != model_name:
+        return None
+    if data.get("src") != _src_sig(video):
+        return None
+    if not isinstance(data.get("words"), list):
+        return None
+    return [interview.Word(w, s, e, p) for w, s, e, p in data["words"]]
+
+
+def save_words(cache: Path, video: Path, model_name: str, words) -> None:
+    """Положить кеш. Пишем через временный файл: обрыв посреди записи
+    оставляет полукорректный JSON, а он тогда просто не прочитается и
+    файл распознается заново — результат не портится."""
+    payload = {"model": model_name, "src": _src_sig(video),
+               "words": [[w.w, w.start, w.end, w.prob] for w in words]}
+    tmp = cache.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(cache)
+    except Exception:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
 def speak_chunks(video: Path, work: Path, model, model_name: str,
                  device: str, max_pause: float, merge_gap: float,
                  min_keep: float):
@@ -76,10 +157,17 @@ def speak_chunks(video: Path, work: Path, model, model_name: str,
     Возвращает None, если файл не дал речи: значит это не тот дубль.
     """
     wav = work / (video.stem + "_16k.wav")
+    cache = work / (video.stem + ".tr.json")
     try:
-        if not wav.exists():
-            interview.extract_wav(video, wav)
-        words, _ = interview.transcribe(wav, model_name, device)
+        words = load_words(cache, video, model_name)
+        if words is None:
+            if not wav.exists():
+                interview.extract_wav(video, wav)
+            m, dev = get_model(model_name, device)
+            print("  {}: распознаю...".format(video.name))
+            words, _ = interview.transcribe_audio_array(
+                interview.load_mono16(wav), m, video.stem)
+            save_words(cache, video, model_name, words)
         if not words:
             return None
         keeps, _dropped = interview.build_keeps(words, max_pause, merge_gap,
@@ -235,6 +323,9 @@ def broll_csv(folder: Path, out_csv: Path, log, device="auto",
     `detect.py` — он уже это умеет. Свою копию этой логики заводить
     незачем: разъедутся настройки, и дайджест начнёт отбирать кадры иначе,
     чем обычная нарезка. Здесь только запуск.
+
+    Разбор переиспользуется, если ни файлы, ни настройки не менялись:
+    иначе каждое «Собрать дайджест» в окне заново прогоняет 110 клипов.
     """
     import subprocess
     files = videos(folder)
@@ -242,6 +333,11 @@ def broll_csv(folder: Path, out_csv: Path, log, device="auto",
         log("Нарезка: папка пуста")
         return None
     out_csv.parent.mkdir(parents=True, exist_ok=True)
+    key = {"v": 1, "model": model_name, "files": folder_sig(folder),
+           "cfg": settings_sig(DETECT_KEYS)}
+    if is_fresh(out_csv, key):
+        log("Нарезка: разбор не изменился, беру готовый")
+        return out_csv
     cmd = [sys.executable, "-m", "src.ml.detect", "--input", str(folder),
            "--output", str(out_csv), "--device", device]
     log("Нарезка: разбираю {} клипов".format(len(files)))
@@ -259,29 +355,92 @@ def broll_csv(folder: Path, out_csv: Path, log, device="auto",
     except Exception:
         n = 0
     log("Нарезка: отобрано клипов {}".format(n))
+    mark_fresh(out_csv, key)
     return out_csv
 
 
 # ---------------------------------------------------------------- сборка
 
 
-def write_plan(rows, out_csv: Path):
+# Ключи настроек, которые меняют результат шага. Если человек поправил
+# любой из них, готовый результат переиспользовать нельзя: он посчитан
+# по другим числам. Список ведётся вручную — забыть ключ значит тихо
+# отдать старый разбор под новыми настройками.
+DETECT_KEYS = (
+    "detect.face_w_detail", "detect.face_w_closeup", "detect.person_h_distant",
+    "detect.person_h_general", "detect.person_min_body", "detect.kpt_conf",
+    "detect.low_confidence", "detect.sparse_skeleton_confidence",
+    "detect.min_visible_keypoints", "detect.detect_conf",
+    "detect.frames_per_file", "detect.crowd_people_min",
+    "detect.crowd_body_max", "detect.crowd_back_people_min",
+    "detect.person_h_inframe_min", "detect.person_h_fragment",
+    "detect.person_h_single_point", "detect.person_h_face_only",
+    "detect.model", "sharp.enabled", "sharp.floor_factor", "sharp.shake_max",
+)
+ORDER_KEYS = (
+    "digest.rec_duration_sec", "digest.duration_over_tolerance_sec",
+    "digest.max_same_plan_run", "digest.max_scale_jump", "digest.order_seed",
+    "digest.two_opt_iterations", "digest.digest_finale_wide",
+)
+
+
+def folder_sig(folder: Path):
+    """Подпись папки: имя, размер и время каждого видео."""
+    sig = {}
+    for p in sorted(videos(folder)):
+        st = p.stat()
+        sig[p.name] = [int(st.st_size), int(st.st_mtime_ns)]
+    return sig
+
+
+def settings_sig(keys):
+    return {k: settings.get(k) for k in keys}
+
+
+def _key_id(key) -> str:
+    blob = json.dumps(key, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _sidecar(cache: Path) -> Path:
+    return cache.with_name(cache.name + ".key")
+
+
+def is_fresh(cache: Path, key) -> bool:
+    """Готовый результат ещё годится: посчитан ровно по этим входам."""
+    side = _sidecar(cache)
+    if not cache.is_file() or not side.is_file():
+        return False
+    try:
+        return side.read_text(encoding="utf-8").strip() == _key_id(key)
+    except Exception:
+        return False
+
+
+def mark_fresh(cache: Path, key) -> None:
+    try:
+        _sidecar(cache).write_text(_key_id(key), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def write_plan(rows, out_csv: Path, base: Path):
     """rows: [(часть, файл, in, out, текст/описание)] -> CSV для Premiere.
 
-    Колонка `path` — путь файла ОТНОСИТЕЛЬНО корня с частями. Premiere
-    ищет медиа в media-dir, а нарезка лежит в исх\нарезка, стендап в
-    исх\стендап: если записать только имя, файл не найдётся и Premiere
-    попросит relink. Относительный путь premiere.py собирает сам.
+    Колонка `path` — путь файла ОТНОСИТЕЛЬНО `base`, того каталога,
+    который пользователь указал в окне и который потом уходит в Premiere
+    как media-dir. Если считать путь от папки с частями, получится
+    «стендап/файл.mp4», и Premiere будет искать его прямо в корне
+    проекта, где его нет: материал лежит на уровень глубже, в `исх`.
+    Тогда Premiere просит relink на каждом клипе.
     """
     with out_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["n", "file", "part", "path", "in", "out", "duration",
                     "desc"])
         for i, (part, path, src_in, src_out, desc) in enumerate(rows, 1):
-            # части уже несут подпапку в .parent, но если файл лежит в
-            # корне (как при --check) — просто имя
             try:
-                rel = path.relative_to(path.parents[1]).as_posix()
+                rel = path.resolve().relative_to(base.resolve()).as_posix()
             except Exception:
                 rel = path.name
             w.writerow([i, path.name, part, rel,
@@ -299,6 +458,12 @@ def run_autocut(broll_csv: Path, order_csv: Path, target_sec: float, log,
     их здесь — значит завести две правды, которые разъедутся.
     """
     import subprocess
+    key = {"v": 1, "target": float(target_sec), "mode": "digest",
+           "broll": hashlib.sha1(broll_csv.read_bytes()).hexdigest(),
+           "cfg": settings_sig(ORDER_KEYS)}
+    if is_fresh(order_csv, key):
+        log("Нарезка: порядок не изменился, беру готовый")
+        return order_csv
     cmd = [sys.executable, "-m", "src.modes.autocut", "--csv", str(broll_csv),
            "--mode", "digest", "--auto", "--out", str(order_csv),
            "--target-sec", str(target_sec), "--device", device]
@@ -316,6 +481,7 @@ def run_autocut(broll_csv: Path, order_csv: Path, target_sec: float, log,
     except Exception:
         n = 0
     log("Нарезка: в порядке кадров {}".format(n))
+    mark_fresh(order_csv, key)
     return order_csv
 
 
@@ -351,10 +517,22 @@ def main(argv=None) -> int:
                     help="хронометраж дайджеста; пусто — digest.target_sec (120)")
     args = ap.parse_args(argv)
 
-    root = Path(args.input).expanduser()
-    if not root.is_dir():
-        print("Нет папки: " + str(root))
+    base = Path(args.input).expanduser()
+    if not base.is_dir():
+        print("Нет папки: " + str(base))
         return 1
+    # base — то, что указал пользователь и что уйдёт в Premiere как
+    # media-dir. Фактическая папка с частями может быть вложенной (исх),
+    # поэтому ищем её отдельно, а пути в плане считаем от base.
+    root, hint = sorter.find_materials(base)
+    if root is None:
+        if hint:
+            print(hint)
+        else:
+            print("В папке не нашлось материала: " + str(base))
+        return 1
+    if hint:
+        print("{}: {}".format(hint, root))
     out_dir = Path(args.out).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     work = out_dir / "_work"
@@ -416,7 +594,7 @@ def main(argv=None) -> int:
         print("Собрать нечего: все три части пустые.")
         return 1
 
-    plan = write_plan(rows, out_dir / "plan.csv")
+    plan = write_plan(rows, out_dir / "plan.csv", base)
     total = sum(o - i for _p, _f, i, o, _d in rows)
     log("\nПлан: " + str(plan))
     log("Кусов: {} (стендап {}, нарезка {}, интервью {})".format(

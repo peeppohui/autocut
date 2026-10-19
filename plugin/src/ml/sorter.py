@@ -84,6 +84,51 @@ def find_input(root: Path):
     return root, False
 
 
+def has_material(folder: Path) -> bool:
+    """Есть ли в папке то, что сортировать.
+
+    Проверяются не только файлы видео прямо в папке, но и три папки
+    частей: материал может уже лежать разложенным (`исх/стендап/...`),
+    и тогда видео в самой `исх` нет, но сортировать там есть что.
+    """
+    if collect(folder):
+        return True
+    names = part_names()
+    subs = [p for p in folder.iterdir() if p.is_dir()] if folder.is_dir() else []
+    return sum(1 for k in ("standup", "broll", "interview")
+               if (folder / names[k]) in subs) >= 2
+
+
+def find_materials(root: Path):
+    """Где внутри корня лежит материал.
+
+    Человек в окне указывает папку проекта, а не папку с ровно видео
+    внутри: рядом лежат `звк`, результат прошлого прогона, `.prproj`.
+    Раньше сортировщик смотрел только на корень и честно падал с «в папке
+    нет видео» — хотя видео были, в одной вложенной папке.
+
+    Ищем папку с материалом: сперва среди известных имён (`исх`,
+    `исходники`, `видео`, `video`, `clips`), затем — любую единственную
+    вложенную. Если кандидатов несколько и ни один не известный, это
+    неоднозначность: говорим, какие варианты, и не гадаем.
+    """
+    if has_material(root):
+        return root, None
+    preferred = ("исх", "исходники", "видео", "video", "clips", "footage")
+    subs = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
+    for name in preferred:
+        for p in subs:
+            if p.name.lower() == name and has_material(p):
+                return p, "материал в подпапке"
+    with_video = [p for p in subs if has_material(p)]
+    if len(with_video) == 1:
+        return with_video[0], "материал в подпапке «{}»".format(with_video[0].name)
+    if not with_video:
+        return None, None
+    return None, ("материал сразу в нескольких папках — укажите нужную: "
+                  + ", ".join(p.name for p in with_video[:8]))
+
+
 def duration_sec(path: Path) -> float:
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -246,6 +291,18 @@ def main(argv=None) -> int:
         for k in DEFAULTS:
             if isinstance(cfg.get(k), (int, float)):
                 th[k] = float(cfg[k])
+
+    # Материал может лежать не прямо в корне, а во вложенной папке.
+    src_root, hint = find_materials(root)
+    if src_root is None:
+        if hint:
+            print(hint)
+            return 1
+        print("В папке нет видео: " + str(root))
+        return 1
+    if hint:
+        print("{}: {}".format(hint, src_root))
+    root = src_root
 
     already, sorted_already = find_input(root)
     if sorted_already and not args.check:
