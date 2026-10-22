@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Панель AutoCut для Premiere Pro.
+
+  Host "PPRO" — Premiere Pro. Диапазон версий широкий намеренно:
+  внутренняя нумерация Premiere и версия плагина не совпадают, а
+  ломать панель на новой версии нельзя.
+
+  Ресурсы: index.html — вид, panel.js — связь с Premiere и с сервером.
+-->
+<ExtensionManifest Version="6.0"
+                   ExtensionBundleId="com.autocut.bridge"
+                   ExtensionBundleVersion="1.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <ExtensionList>
+    <Extension Id="com.autocut.bridge.panel">
+      <HostList>
+        <Host Name="PPRO" Version="[25.0,99.9]"/>
+      </HostList>
+      <Resources>
+        <MainPath>./index.html</MainPath>
+        <ScriptPath>./panel.js</ScriptPath>
+        <CEFCommandLine>
+          <Parameter>--allow-file-access</Parameter>
+          <Parameter>--disable-web-security</Parameter>
+        </CEFCommandLine>
+      </Resources>
+      <Lifecycle>
+        <AutoVisible>true</AutoVisible>
+      </Lifecycle>
+      <UI>
+        <Type>Panel</Type>
+        <Menu>AutoCut</Menu>
+        <Geometry>
+          <Size>
+            <Width>360</Width>
+            <Height>460</Height>
+          </Size>
+        </Geometry>
+        <Icons/>
+      </UI>
+    </Extension>
+  </ExtensionList>
+</ExtensionManifest>
