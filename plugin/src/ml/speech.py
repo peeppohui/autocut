@@ -46,6 +46,22 @@ def get_model(model_name: str, device: str = "auto"):
     return _MODELS[key]
 
 
+def release():
+    """Отпустить видеопамять: whisper и кодировщик тем не влезают вместе.
+
+    Модель распознавания занимает 3 ГБ, кодировщик темы — 2.2 ГБ, а
+    видеопамяти здесь 6 ГБ. Если звать их по очереди без освобождения,
+    второй упадёт с «out of memory» посреди сборки рыбы.
+    """
+    _MODELS.clear()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def src_sig(video: Path):
     """Подпись исходника: размер и время. Замена файла ломает кеш."""
     st = video.stat()

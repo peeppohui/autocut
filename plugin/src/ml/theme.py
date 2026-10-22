@@ -109,8 +109,11 @@ def label_of(video: Path, work: Path, model_name: str, device: str = "auto"):
 
 
 def label_pool(folder: Path, work: Path, model_name: str, device: str = "auto",
-               log=None):
+               log=None, descs=None):
     """Подписи всех клипов папки: {имя файла: подпись}.
+
+    Подпись клипа — это то, что в нём есть: что говорит его собственный
+    звук (с мероприятия) и что видно в кадре (описание моделью).
 
     Кеш кладём в подпапку `broll`: имена файлов у нарезки и у интервью
     пересекаются (C0098 есть и там, и там), а подпись и разметка речи
@@ -118,6 +121,7 @@ def label_pool(folder: Path, work: Path, model_name: str, device: str = "auto",
     """
     cache_dir = work / "broll"
     cache_dir.mkdir(parents=True, exist_ok=True)
+    descs = descs or {}
     labels = {}
     files = sorted(p for p in folder.iterdir()
                    if p.suffix.lower() in (".mp4", ".mov", ".mxf", ".avi"))
@@ -129,10 +133,21 @@ def label_pool(folder: Path, work: Path, model_name: str, device: str = "auto",
             if log:
                 log("  {}: не разобрать звук ({})".format(p.name, str(e)[:70]))
             words, text = [], ""
-        labels[p.name] = {"text": text, "words": words}
+        labels[p.name] = {"text": text, "words": words,
+                           "desc": descs.get(p.name, "")}
         if log and i % 20 == 0:
             log("  {}: подписано {}/{}".format(p.name, i, len(files)))
     return labels
+
+
+def label_text(lab):
+    """Текст клипа целиком: что говорят и что видно."""
+    parts = []
+    if lab.get("text"):
+        parts.append(lab["text"])
+    if lab.get("desc"):
+        parts.append(lab["desc"])
+    return " ".join(parts).strip()
 
 
 def idf(labels):
@@ -144,7 +159,7 @@ def idf(labels):
     n = max(1, len(labels))
     df = {}
     for lab in labels.values():
-        for w in content_words(lab.get("text", "")):
+        for w in content_words(label_text(lab)):
             df[w] = df.get(w, 0) + 1
     return {w: math.log(n / c) for w, c in df.items()}
 
@@ -166,17 +181,99 @@ def score_text(sentence: str, text: str, weights) -> float:
     return s / sum(weights.get(w, 1.0) for w in q)
 
 
-def best_matches(sentence: str, labels, weights, exclude=(), limit: int = 3):
+# --- нейросетевое сопоставление ---
+#
+# Лексика по IDF не находит «математика → кадр с опытами»: общего
+# слова нет. Описание кадра и реплика — русские тексты, и их сравнивает
+# многоязычный кодировщик. Замер на живом материале: e5-large ставит
+# выбор редактора на 24-е место из 110, тогда как лексика — на 84-е, а
+# CLIP по картинке — на 45-е.
+EMBED_MODEL = "intfloat/multilingual-e5-large"
+_EMBEDDER = {}
+
+
+def get_embedder(model_name: str = EMBED_MODEL):
+    """Кодировщик один раз на прогон.
+
+    Если видеопамять занята (например, не освободили whisper), считаем
+    на процессоре: текстов мало, строк коротких, и на процессоре это
+    минута, а падение с «out of memory» посреди сборки — хуже.
+    """
+    if model_name not in _EMBEDDER:
+        from sentence_transformers import SentenceTransformer
+        import torch
+        dev = "cpu"
+        if torch.cuda.is_available():
+            free = torch.cuda.mem_get_info()[0] / (1024 ** 3)
+            if free > 4.0:
+                dev = "cuda"
+        _EMBEDDER[model_name] = SentenceTransformer(model_name, device=dev)
+    return _EMBEDDER[model_name]
+
+
+def embed(texts, model_name: str = EMBED_MODEL):
+    """Векторы текстов, нормированные для скалярного произведения."""
+    if not texts:
+        return []
+    import torch
+    m = get_embedder(model_name)
+    with torch.no_grad():
+        v = m.encode(["passage: " + t for t in texts], convert_to_numpy=True,
+                     normalize_embeddings=True, show_progress_bar=False)
+    return v
+
+
+def embed_query(text: str, model_name: str = EMBED_MODEL):
+    m = get_embedder(model_name)
+    import torch
+    with torch.no_grad():
+        v = m.encode(["query: " + text], convert_to_numpy=True,
+                     normalize_embeddings=True, show_progress_bar=False)
+    return v[0]
+
+
+def release_embedder():
+    """Отпустить видеопамять: описание кадров и векторы — по очереди."""
+    import torch
+    _EMBEDDER.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def embed_labels(labels, model_name: str = EMBED_MODEL):
+    """Векторы подписей: {имя клипа: вектор}.
+
+    Считаются один раз на прогон. Если считать на каждый подбор заново,
+    сотня клипов умножается на число подборов — это минуты на каждый
+    вызов вместо одного раза.
+    """
+    names = list(labels)
+    if not names:
+        return {}
+    vecs = embed([label_text(labels[n]) for n in names], model_name)
+    return dict(zip(names, vecs))
+
+
+def best_matches(sentence: str, labels, weights, exclude=(), limit: int = 3,
+                 neural: bool = False, vecs=None):
     """Клипы, подходящие под реплику: [(имя, оценка)], лучшие первыми.
 
     `exclude` — уже использованные клипы: повторять один и тот же кадр
     в ролике нельзя, монтажёр сразу это видит.
     """
+    if neural and vecs:
+        import numpy as np
+        names = [n for n in vecs if n not in exclude]
+        if names:
+            q = embed_query(sentence)
+            sims = np.array([float(vecs[n] @ q) for n in names])
+            order = np.argsort(-sims)
+            return [(names[int(i)], float(sims[int(i)])) for i in order[:limit]]
     scored = []
     for name, lab in labels.items():
         if name in exclude:
             continue
-        v = score_text(sentence, lab.get("text", ""), weights)
+        v = score_text(sentence, label_text(lab), weights)
         if v > 0:
             scored.append((name, v))
     scored.sort(key=lambda kv: -kv[1])

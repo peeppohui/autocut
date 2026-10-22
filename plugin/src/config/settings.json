@@ -120,7 +120,8 @@
     "max_same_plan_run": 3,
     "digest_finale_wide": true,
     "order_seed": 42,
-    "two_opt_iterations": 2000
+    "two_opt_iterations": 2000,
+    "describe_model": "Qwen/Qwen2-VL-2B-Instruct"
   },
   "detect": {
     "_note": "src/ml/detect.py — эвристика определения крупности по YOLOv8-pose.",

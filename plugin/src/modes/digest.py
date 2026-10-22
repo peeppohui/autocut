@@ -40,6 +40,7 @@ import settings             # noqa: E402
 
 import interview            # noqa: E402
 import speech               # noqa: E402
+from ml import describe      # noqa: E402
 from ml import sorter       # noqa: E402
 from ml import theme        # noqa: E402
 
@@ -93,6 +94,11 @@ def videos(folder: Path):
 PHRASE_GAP = 0.45
 MAX_PIECE = 4.5
 MIN_PIECE = 1.2
+# Стендап режется крупнее: в ролике корреспондента сменяли ракурсы раз
+# в 2–4 секунды, но ЗВУК шёл непрерывно. Резать один дубль на куски по
+# две секунды — значит жевать слова: «6 научных фронтов» отдельным куском
+# звучит как заикание. Один дубль режется только по концам фраз.
+STANDUP_MAX_PIECE = 12.0
 
 
 def phrase_pieces(words, max_piece=MAX_PIECE, min_piece=MIN_PIECE,
@@ -245,8 +251,17 @@ def process_standup(folder: Path, work: Path, model_name, device, log,
                     budget=None):
     """Лучший дубль стендапа -> [(файл, in, out, текст)].
 
-    Куски режутся по границам фраз: стендап читают в кадр, и обрыв
-    посередине фразы слышно.
+    ОДИН кусок, непрерывный звук. В готовом дайджесте стендап шёл
+    21.7 секунды непрерывной речи, а картинка менялась каждые 2–4 с
+    (C0101 -> FX20032 -> C0109 -> C0102): редактор менял РАКУРС, а не
+    резал речь. Резать один дубль на куски по две секунды — значит
+    жевать слова: «6 научных фронтов» отдельным куском звучит как
+    заикание.
+
+    Поэтому берём один связный кусок речи. Если речь в файле идёт
+    несколькими заходами (запись с дублями), берём самый длинный
+    заход, а если он длиннее бюджета — обрезаем по последнему слову,
+    чтобы не разрезать фразу пополам.
     """
     files = videos(folder)
     if not files:
@@ -268,13 +283,52 @@ def process_standup(folder: Path, work: Path, model_name, device, log,
         log("Стенап: ни один дубль не дал разборчивой речи")
         return []
     _rank, path, words, total = best
-    pieces = phrase_pieces(words, limit_sec=target)
-    if not pieces:
-        log("Стенап: речь не разбилась на фразы")
+
+    run = best_run(words, target)
+    if run is None:
+        log("Стенап: речь не разбилась на связные заходы")
         return []
-    log("Стенап: {} из {} дублей, речи {:.0f}с, берём {} кусков по фразам"
-        .format(path.name, len(files), total, len(pieces)))
-    return [(path, i, o, t) for i, o, t in pieces]
+    i, o, text = run
+    log("Стенап: {} из {} дублей, речи {:.0f}с, берём один кусок {:.1f}с"
+        .format(path.name, len(files), total, o - i))
+    return [(path, i, o, text)]
+
+
+def best_run(words, budget):
+    """Самый длинный связный заход речи, влезающий в бюджет.
+
+    Возвращает (начало, конец, текст) или None. Границы — по словам,
+    чтобы не разрезать фразу.
+    """
+    if not words:
+        return None
+    runs = []
+    cur = [words[0]]
+    for w in words[1:]:
+        if w[1] - cur[-1][2] > 1.2:
+            runs.append(cur)
+            cur = [w]
+        else:
+            cur.append(w)
+    runs.append(cur)
+    best = None
+    for run in runs:
+        span = run[-1][2] - run[0][1]
+        if span <= budget and (best is None or span > best[0]):
+            best = (span, run)
+    if best is None:
+        # Ни один заход не влез: берём первый и режем по последнему
+        # слову, которое в бюджет влезает.
+        run = runs[0]
+        cut = [w for w in run if w[2] - run[0][1] <= budget]
+        if not cut:
+            return None
+        run = cut
+    run = best[1] if best else run
+    i = run[0][1]
+    o = run[-1][2]
+    text = " ".join(w for w, _s, _e in run)
+    return (i, o, text)
 
 
 def process_interviews(folder: Path, work: Path, model_name, device, log,
@@ -361,7 +415,10 @@ def broll_csv(folder: Path, out_csv: Path, log, device="auto",
 # ставил куски по 1.2-2.6 с, а сами клипы по 5-13 с. Кусок нарезки в
 # ролике — это НЕ клип целиком, а короткая вырезка из него.
 BROLL_PIECE_MIN = 1.2
-BROLL_PIECE_MAX = 3.0
+# Потолок вырезки нарезки. Замер на готовом дайджесте: 32 куска, от
+# 0.72 до 4.16 с, в среднем 1.73. Ровные куски одной мерой смотрятся
+# как слайдшоу, а не как монтаж.
+BROLL_PIECE_MAX = 2.6
 
 
 def pick_excerpt(words, dur, want=BROLL_PIECE_MAX):
@@ -388,6 +445,11 @@ def pick_excerpt(words, dur, want=BROLL_PIECE_MAX):
     return (max(0.0, mid - want / 2.0), min(float(dur), mid + want / 2.0))
 
 
+# Меры вырезки нарезки. В готовом дайджесте куски шли разной длины
+# (0.72…4.16 с), и ровные куски одной мерой читаются как слайдшоу.
+BROLL_MEASURES = (1.2, 1.55, 1.9, 2.25, 2.6)
+
+
 def broll_segments(folder: Path, labels, log, keep=None, plans=None,
                    piece_min=BROLL_PIECE_MIN, piece_max=BROLL_PIECE_MAX):
     """Клипы нарезки -> короткие вырезки [(файл, in, out, подпись, план)].
@@ -401,7 +463,7 @@ def broll_segments(folder: Path, labels, log, keep=None, plans=None,
     подряд не шло три одинаковых плана.
     """
     out = []
-    for p in videos(folder):
+    for k, p in enumerate(videos(folder)):
         if keep is not None and p.name not in keep:
             continue
         lab = labels.get(p.name) or {}
@@ -411,7 +473,10 @@ def broll_segments(folder: Path, labels, log, keep=None, plans=None,
             dur = clip_duration(p)
         if dur < piece_min:
             continue
-        a, b = pick_excerpt(words, dur, piece_max)
+        # Мера вырезки — по порядку клипов, а не одна на всех: иначе
+        # все куски нарезки идут одной длиной и смотрятся как слайдшоу.
+        want = min(piece_max, BROLL_MEASURES[k % len(BROLL_MEASURES)])
+        a, b = pick_excerpt(words, dur, want)
         if b - a < min(piece_min, dur):
             a, b = 0.0, dur
         if b - a > piece_max:
@@ -525,26 +590,31 @@ def write_plan(rows, out_csv: Path, base: Path):
     return out_csv
 
 
-# Доля хронометража под нарезку. Замер на готовом дайджесте: стендап
-# 21.7с, нарезка 25.2с, интервью 54с из 101.7 — примерно 22/25/53.
-SHARE_STANDUP = 0.22
-SHARE_BROLL = 0.25
+# Доли экранного времени. Замер на готовом дайджесте по совпавшим
+# кадрам: нарезка 55.4 с из 101.7 (55%), интервью 24.6 с (24%),
+# стендап 21.7 с (21%). Нарезка идёт первой по замыслу: «сначала
+# ведущий объясняет, потом показываем, потом даём голос участникам» —
+# и в готовом ролике показывают больше половины времени.
+SHARE_STANDUP = 0.21
+SHARE_BROLL = 0.55
 
 
 def build_digest(standup, broll, interviews, labels, weights, log,
-                 target):
+                 target, neural=True):
     """Рыба дайджеста по рецепту редактора.
 
     standup: [(файл, in, out, текст)] — куски лучшего дубля.
     broll: [(файл, in, out, подпись, план, кто в кадре)].
     interviews: [(файл, [(in, out, текст)])] — куски по фразам.
 
-    Порядок секвенции: стендап -> нарезка-подводка -> интервью с
-    нарезкой-вставками -> нарезка-финал.
+    Устройство — как в готовом ролике: стендап идёт спереди и звучит
+    непрерывно, потом нарезка-подводка, потом интервью, а нарезка
+    перемежает интервью блоками по 2–6 кусков.
 
-    Нарезка-вставка ставится под речь по теме: тема клипа взята из его
-    СОБСТВЕННОГО звука (голос с мероприятия попал в микрофон камеры).
-    Это черновик, а не решение: монтажёр правит его в панели разбора.
+    Нарезка подбирается ПО ТЕМЕ: что сказано — что показано. Тема
+    реплики сравнивается с описанием кадра (его сделала модель) и с
+    тем, что говорит в СВОЕМ звуке сам клип. Это черновик, а не
+    решение: монтажёр правит его в панели разбора.
     """
     rows = []
     used = set()
@@ -552,12 +622,22 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     nar_budget = target * SHARE_BROLL
     iv_budget = target - st_budget - nar_budget
 
-    def take_broll(seg):
-        path, a, b, text, _plan, _hero = seg
-        used.add(path.name)
-        return ("нарезка", path, a, b, text[:140])
+    # Векторы подписей клипов: ими меряется и смысл, и повторяемость.
+    # Считаются один раз: на каждый подбор заново считать дорого, а
+    # клипов под сотню.
+    vecs = None
+    if neural and broll:
+        try:
+            vecs = theme.embed_labels(labels)
+        except Exception as e:
+            log("  Векторы не посчитались ({}), подбор по теме — по словам"
+                .format(str(e)[:60]))
+            vecs = None
+    recent = []
+    history = []
+    last_num = [None]
 
-    def varied(history, seg):
+    def varied(seg):
         """Не больше двух подряд одной пары (крупность, кто в кадре).
 
         Замер на готовом ролике: редактор чередовал общий, средний и
@@ -570,80 +650,139 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         same = [h for h in history[-2:] if h == (plan, hero)]
         return len(same) < 2
 
+    def near_number(name):
+        """Не идти подряд по соседним номерам файлов.
+
+        Нумерация камеры идёт по порядку съёмки: C0011, C0012, C0013 —
+        это один и тот же объект, и три раунда подряд не показывают.
+        """
+        if last_num[0] is None:
+            return False
+        return abs(clip_number(name) - last_num[0]) <= 3
+
+    def too_similar(name):
+        """Не повторять один и тот же сюжет подряд.
+
+        Два кадра подряд из одного места (дети за столом, дети за столом)
+        монтажёр видит как «монтаж не сделан», даже если крупность
+        разная.
+        """
+        if vecs is None or name not in vecs:
+            return False
+        for other in recent[-2:]:
+            if other and other in vecs and float(vecs[name] @ vecs[other]) > 0.86:
+                return True
+        return False
+
     nar_spent = [0.0]
 
-    def pick_block(rows_out, budget, history):
-        """Блок нарезки: короткие вырезки подряд.
+    used_themes = set()
 
-        Два правила. Первое — не больше двух подряд одной пары
-        (крупность, кто в кадре). Второе — не идти подряд по соседним
-        номерам файлов: нумерация камеры идёт по порядку съёмки, и
-        C0011, C0012, C0013 — это один и тот же объект, три раунда подряд
-        не показывают.
+    def theme_key(seg):
+        """Тема клипа по его собственному звуку.
+
+        Клипы без речи темы не имеют, и ограничивать их нечем: ключ
+        пустой, и проверка их пропускает.
         """
-        spent = 0.0
-        for seg in broll:
-            if spent >= budget or nar_spent[0] >= nar_budget:
+        lab = labels.get(seg[0].name) or {}
+        return " ".join((lab.get("text") or "").split()).lower()
+
+    def take_broll(seg):
+        path, a, b, text, plan, hero = seg
+        used.add(path.name)
+        recent.append(path.name)
+        history.append((plan, hero))
+        last_num[0] = clip_number(path.name)
+        key = theme_key(seg)
+        if key:
+            used_themes.add(key)
+        nar_spent[0] += b - a
+        return ("нарезка", path, a, b, text[:140])
+
+    def pick_for(text, limit):
+        """Клипы под тему текста: по описанию кадра и по его звуку."""
+        got = []
+        if not text:
+            return got
+        best = theme.best_matches(text, labels, weights,
+                                  exclude=used, limit=limit * 4,
+                                  neural=neural, vecs=vecs)
+        for name, _score in best:
+            if name in used or too_similar(name):
+                continue
+            seg = broll_by_name(broll, name)
+            if seg is None:
+                continue
+            if not varied(seg) or near_number(name):
+                continue
+            key = theme_key(seg)
+            if key and key in used_themes:
+                # Одна тема — один кадр. Иначе в ролике два раза
+                # показывают один и тот же кусок мероприятия, и монтажёр
+                # видит это как «монтаж не сделан».
+                continue
+            got.append(seg)
+            if len(got) >= limit:
                 break
-            if seg[0].name in used or not varied(history, seg):
-                continue
-            if history and abs(clip_number(seg[0].name)
-                               - clip_number(last_name[0])) <= 3:
-                continue
-            rows_out.append(take_broll(seg))
-            last_name[0] = seg[0].name
-            history.append((seg[4], seg[5]))
-            dur = seg[2] - seg[1]
-            spent += dur
-            nar_spent[0] += dur
-        return spent
+        return got
 
-    last_name = [""]
+    def block(text, limit):
+        """Блок нарезки: куски под тему, пока хватает доли."""
+        got = []
+        for seg in pick_for(text, limit):
+            if nar_spent[0] >= nar_budget:
+                break
+            got.append(take_broll(seg))
+        return got
 
-    # ---- стендап: голос в кадр, спереди ----
-    spent = 0.0
+    # ---- стендап: голос в кадр, спереди, непрерывно ----
+    standup_text = ""
     for path, i, o, text in standup:
-        if spent + (o - i) > st_budget and rows:
+        if (o - i) > st_budget and rows:
             break
         rows.append(("стендап", path, i, o, text[:200]))
-        spent += o - i
+        standup_text += " " + text
 
-    # ---- нарезка-подводка: короткий блок в начале ----
-    history = []
-    block = nar_budget * 0.30
-    pick_block(rows, block, history)
+    # ---- нарезка-подводка: показываем, о чём речь в стендапе ----
+    # В готовом ролике подводка — 6 кусков по 1.2–2.1 с, и это треть
+    # всей нарезки.
+    for seg in block(standup_text, 6):
+        rows.append(seg)
 
-    # ---- интервью: куски по фразам, между ними нарезка-вставки ----
+    # ---- интервью, перемежаемое нарезкой ----
+    # Редактор так и делал: ответ спикера (1–2 куска), потом блок
+    # нарезки (2–6 кусков), потом следующий ответ.
     per = iv_budget / max(1, len(interviews))
     for n, (path, pieces) in enumerate(interviews):
-        if n:
-            # Блок нарезки между интервью: редактор так и делал — между
-            # ответами шла тематическая подборка, и это «пауза» в речи.
-            pick_block(rows, block, history)
         left = per
         first = True
         for i, o, text in pieces:
             if left <= 0:
                 break
-            if not first:
-                # Вставка между кусками: тема берётся из текста куска,
-                # клип — по совпадению темы со звуком нарезки. Вставка
-                # идёт в счёт доли НАРЕЗКИ, а не в счёт ответа
-                # спикера: иначе интервью съедалось вставками.
-                if nar_spent[0] < nar_budget:
-                    best = theme.best_matches(text, labels, weights,
-                                              exclude=used, limit=1)
-                    if best:
-                        seg = broll_by_name(broll, best[0][0])
-                        if seg:
-                            rows.append(take_broll(seg))
-                            nar_spent[0] += seg[2] - seg[1]
             rows.append(("интервью", path, i, o, text[:200]))
             left -= (o - i)
+            if not first or n:
+                # Блок нарезки под ответ: тема берётся из того, что
+                # сказал спикер, клип — по совпадению темы с описанием
+                # кадра.
+                for seg in block(text, 4):
+                    rows.append(seg)
             first = False
 
-    # ---- добор нарезкой: до потолка хронометража ----
-    pick_block(rows, nar_budget, history)
+    # ---- закрывающий блок нарезки: до потолка хронометража ----
+    # В готовом ролике последние пятнадцать секунд — сплошная нарезка.
+    if nar_spent[0] < nar_budget:
+        for seg in broll:
+            if nar_spent[0] >= nar_budget:
+                break
+            if seg[0].name in used or too_similar(seg[0].name):
+                continue
+            if not varied(seg) or near_number(seg[0].name):
+                continue
+            key = theme_key(seg)
+            if key and key in used_themes:
+                continue
+            rows.append(take_broll(seg))
     return rows
 
 
@@ -678,13 +817,16 @@ def write_shelf(broll, labels, plans, rows, out_csv: Path):
     with out_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["файл", "в рыбе", "in", "out", "крупность", "кто в кадре",
-                    "тема (из звука клипа)", "длительность"])
+                    "тема (из звука клипа)", "что в кадре (описание)",
+                    "длительность"])
         for path, a, b, text, plan, hero in broll:
             lab = labels.get(path.name) or {}
             dur = float(lab.get("dur") or 0.0)
+            desc = (lab.get("desc") or "").strip()
             w.writerow([path.name, used.get(path.name, ""),
                         "{:.1f}".format(a), "{:.1f}".format(b),
                         plan, hero, text or "(без речи)",
+                        desc or "(не описано)",
                         "{:.1f}".format(dur)])
     return out_csv
 
@@ -762,17 +904,38 @@ def main(argv=None) -> int:
     if target is None:
         target = float(settings.get("digest.target_sec", 120) or 120)
 
+    # ---- что в кадрах нарезки: описание моделью ----
+    # Без этого нарезка выбирается «первыми по алфавиту», и ролик
+    # выглядит как случайный набор кадров.
+    desc_model = str(settings.get("digest.describe_model",
+                                     describe.DEFAULT_MODEL) or "")
+    descs = {}
+    if desc_model:
+        log("Нарезка: описываю кадры ({})".format(desc_model.split("/")[-1]))
+        try:
+            descs = describe.describe_pool(parts["broll"], work, desc_model,
+                                           args.device, log)
+        except Exception as e:
+            log("  Описать кадры не вышло ({}), подбор будет по звуку"
+                .format(str(e)[:80]))
+            descs = {}
+    log("Нарезка: описано {} клипов".format(len(descs)))
+
     # ---- темы нарезки: из её собственного звука ----
     log("Нарезка: подписываю клипы по их звуку")
     labels = theme.label_pool(parts["broll"], work, args.model, args.device,
-                               log)
+                               log, descs=descs)
     for name in labels:
         labels[name]["dur"] = clip_duration(parts["broll"] / name)
     weights = theme.idf(labels)
     voiced = len([n for n in labels if theme.content_words(
-        labels[n].get("text", ""))])
-    log("Нарезка: подписано {} клипов, из них с речью {}".format(
-        len(labels), voiced))
+        theme.label_text(labels[n]))])
+    log("Нарезка: подписано {} клипов, из них с описанием или речью {}"
+        .format(len(labels), voiced))
+
+    # Whisper освобождаем: распознавание закончено, а кодировщик темы
+    # и так занимает 2.2 ГБ. Вместе они в 6 ГБ не влезают.
+    speech.release()
 
     # ---- стендап: один лучший дубль, нарезанный по фразам ----
     st_budget = target * SHARE_STANDUP
