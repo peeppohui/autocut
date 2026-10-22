@@ -151,7 +151,7 @@ c.close()
 
 from mcp_server import bridge       # noqa: E402
 
-port = bridge.start()
+port = bridge.start(port=8941)
 ok("мост поднялся", port is not None, str(port))
 if port:
     import urllib.request

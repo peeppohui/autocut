@@ -130,7 +130,11 @@ var COMMANDS = {
 function postResult(id, ok, data) {
   fetch(BRIDGE + "/result", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // text/plain, а не application/json: с application/json браузер
+  // спрашивает сервер заранее (preflight), а панель CEP живёт в
+  // file:// и такой запрос может не пройти. Сервер разбирает
+  // тело как JSON независимо от заголовка.
+  headers: { "Content-Type": "text/plain;charset=utf-8" },
     body: JSON.stringify({ id: id, ok: ok, "данные": data })
   }).catch(function (e) {
     log("не отправил результат: " + e, "err");

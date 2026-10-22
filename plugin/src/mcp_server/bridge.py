@@ -28,6 +28,10 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8931
+# Панель перебирает порты по очереди, и сервер должен выбирать так же,
+# иначе они разойдутся: сервер встанет на 8932, а панель пойдёт по
+# 8931 и упрётся в чужой сервер.
+PORTS = (8931, 8932, 8933)
 
 
 class Bridge:
@@ -36,7 +40,8 @@ class Bridge:
     def __init__(self):
         self.pending = []          # команды, которые панель заберёт
         self.results = {}          # id -> результат
-        self.pings = 0             # сколько раз панель откликнулась
+        self.pings = 0             # сколько раз спросили /ping
+        self.polls = 0             # сколько раз панель забрала команду
         self.last_seen = 0.0
         self._lock = threading.Lock()
         self._events = threading.Condition(self._lock)
@@ -73,10 +78,14 @@ class Bridge:
             return self.results.pop(cid)
 
     def status(self) -> dict:
+        # Панель забирает команды через /next, а проверка связи идёт
+        # через /ping. Считать их одним счётчиком нельзя: агент сам
+        # проверяет связь и ping'ов больше, чем опросов панели.
         with self._lock:
             last = (time.time() - self.last_seen) if self.last_seen else None
-            return {"панель_на связи": self.pings > 0,
-                    "опросов": self.pings,
+            return {"панель_на связи": self.polls > 0,
+                    "опросов_панели": self.polls,
+                    "проверок_связи": self.pings,
                     "секунд_с_последнего": round(last, 1) if last else None,
                     "в_очереди": len(self.pending)}
 
@@ -102,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/next"):
             with BRIDGE._lock:
-                BRIDGE.pings += 1
+                BRIDGE.polls += 1
                 BRIDGE.last_seen = time.time()
             cmd = BRIDGE.take()
             self._send(200, cmd or {})
@@ -133,15 +142,38 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "нет такого маршрута"})
 
     def do_OPTIONS(self):
-        self._send(200, {})
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
-def start(port: int = DEFAULT_PORT):
-    """Поднять мост в фоне. Возвращает порт или None, если не вышло."""
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    except OSError:
-        return None
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
-    th.start()
-    return port
+class Server(ThreadingHTTPServer):
+    """Сервер моста.
+
+    `allow_reuse_address` выключен НАМЕРЕННО: на Windows с ним можно
+    сесть на порт, который уже занят, и тогда на одном порте окажутся
+    два сервера — и кто из них ответит на запрос, угадать нельзя.
+    """
+
+    allow_reuse_address = False
+    daemon_threads = True
+
+
+def start(port: int = 0):
+    """Поднять мост в фоне. Возвращает порт или None, если не вышло.
+
+    `port` = 0 — перебрать PORTS по очереди и взять первый свободный.
+    """
+    ports = (port,) if port else PORTS
+    for p in ports:
+        try:
+            srv = Server(("127.0.0.1", p), Handler)
+        except OSError:
+            continue
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        return p
+    return None
