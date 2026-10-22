@@ -41,6 +41,8 @@ class Bridge:
         self.pending = []          # команды, которые панель заберёт
         self.results = {}          # id -> результат
         self.pings = 0             # сколько раз спросили /ping
+        self.panel_log = []        # журнал панели: без него её состояние
+                                   # видно только глазами на экране Premiere
         self.polls = 0             # сколько раз панель забрала команду
         self.last_seen = 0.0
         self._lock = threading.Lock()
@@ -77,6 +79,18 @@ class Bridge:
                 self._events.wait(timeout=min(left, 1.0))
             return self.results.pop(cid)
 
+    def add_log(self, text: str) -> None:
+        with self._lock:
+            for line in str(text).splitlines():
+                if line.strip():
+                    self.panel_log.append(line.strip())
+            if len(self.panel_log) > 120:
+                del self.panel_log[:len(self.panel_log) - 120]
+
+    def log(self) -> list:
+        with self._lock:
+            return list(self.panel_log[-60:])
+
     def status(self) -> dict:
         # Панель забирает команды через /next, а проверка связи идёт
         # через /ping. Считать их одним счётчиком нельзя: агент сам
@@ -87,7 +101,8 @@ class Bridge:
                     "опросов_панели": self.polls,
                     "проверок_связи": self.pings,
                     "секунд_с_последнего": round(last, 1) if last else None,
-                    "в_очереди": len(self.pending)}
+                    "в_очереди": len(self.pending),
+                    "журнал_панели": list(self.panel_log[-30:])}
 
 
 BRIDGE = Bridge()
@@ -125,6 +140,9 @@ class Handler(BaseHTTPRequestHandler):
                 BRIDGE.last_seen = time.time()
             self._send(200, BRIDGE.status())
             return
+        if self.path.startswith("/result"):
+            self._get_result(self.path)
+            return
         self._send(404, {"error": "нет такого маршрута"})
 
     def do_POST(self):
@@ -139,7 +157,41 @@ class Handler(BaseHTTPRequestHandler):
                           data.get("данные"))
             self._send(200, {"ok": True})
             return
+        if self.path.startswith("/log"):
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            BRIDGE.add_log(raw)
+            self._send(200, {"ok": True})
+            return
+        if self.path.startswith("/command"):
+            # Поставить команду в очередь извне. Нужно, чтобы до сервера
+            # можно было дотянуться не только по MCP: очередь живёт в
+            # памяти процесса, и из другого процесса до неё не дойти.
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n).decode("utf-8", "replace")
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = {}
+            cmd = data.get("cmd") or data.get("команда") or ""
+            args = data.get("args") or data.get("аргументы") or {}
+            if not cmd:
+                self._send(400, {"ok": False, "error": "не указана команда"})
+                return
+            cid = BRIDGE.submit(cmd, args)
+            self._send(200, {"ok": True, "id": cid})
+            return
         self._send(404, {"error": "нет такого маршрута"})
+
+    def _get_result(self, path):
+        """GET /result?id=... — забрать ответ по команде.
+
+        Нужно, чтобы результат можно было увидеть извне процесса
+        сервера: очередь и ответы живут в его памяти.
+        """
+        cid = path.split("id=", 1)[1].split("&")[0] if "id=" in path else ""
+        res = BRIDGE.wait(cid, timeout=0.2) if cid else None
+        self._send(200, res if res is not None else {})
 
     def do_OPTIONS(self):
         self.send_response(200)

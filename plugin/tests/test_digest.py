@@ -288,9 +288,22 @@ ok("нарезки в рыбе больше половины",
    _share4.get("нарезка", 0) > 0.45,
    str({k: round(v, 2) for k, v in _share4.items()}))
 _nar4 = [r for r in _rows4 if r[0] == "нарезка"]
-ok("куски нарезки не длиннее 2.6 с",
-   all((r[3] - r[2]) <= 2.6 + 0.01 for r in _nar4),
-   str([round(r[3] - r[2], 2) for r in _nar4[:6]]))
+# По эталону: пока идёт голос, нарезка идёт короткими вырезками; после
+# голоса — целыми клипами.
+_voice_end4 = max([r[6] + (r[3] - r[2]) for r in _rows4
+                   if r[0] != "нарезка"] or [0])
+_over4 = [r for r in _nar4 if r[6] < _voice_end4]
+_tail4 = [r for r in _nar4 if r[6] >= _voice_end4]
+ok("вырезки нарезки поверх голоса не длиннее 2.6 с",
+   all((r[3] - r[2]) <= 2.6 + 0.01 for r in _over4),
+   str([round(r[3] - r[2], 2) for r in _over4[:6]]))
+ok("в хвосте нарезка целыми клипами",
+   all((r[3] - r[2]) > 2.6 or (r[2] - r[2]) == 0 for r in _tail4),
+   str([round(r[3] - r[2], 2) for r in _tail4[:6]]))
+ok("нарезка лежит на второй дорожке, голос на первой",
+   all(r[5] == "V2" for r in _nar4) and
+   all(r[5] == "V1" for r in _rows4 if r[0] != "нарезка"),
+   str([(r[0], r[5]) for r in _rows4[:4]]))
 _ok4 = True
 for a, b in zip(_nar4, _nar4[1:]):
     if abs(DG.clip_number(a[1].name) - DG.clip_number(b[1].name)) <= 3:

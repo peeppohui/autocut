@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Панель AutoCut для Premiere Pro.
+
+  Формат — CEP 7, как у самой Premiere 2026: ExecutionEnvironment с
+  перечнем хостов и DispatchInfoList, где у каждого расширения своё
+  описание. Старый формат (хосты прямо в Extension) Premiere 26 не
+  читает, и панель молча не появляется в меню.
+
+  Манифест лежит в папке CSXS — так его кладёт сам Premiere
+  (CEP\extensions\<имя>\CSXS\manifest.xml). Пути в Resources считаются
+  от корня расширения, а не от папки CSXS.
+
+  Два расширения:
+  * panel — то, что человек открывает руками (Окно -> Расширения ->
+    AutoCut), чтобы посмотреть состояние. Сама не выскакивает.
+  * agent — без интерфейса, стартует при активации приложения. Работает
+    всегда, даже если человек панель никогда не открывал: без него
+    пришлось бы просить кликнуть перед каждой командой.
+
+  Флаги CEFCommandLine — те же, что у рабочего моста в Premiere
+  2020-2026: с другими PlugPlug расширение не грузится вовсе.
+-->
+<ExtensionManifest Version="7.0"
+                   ExtensionBundleId="com.autocut.bridge"
+                   ExtensionBundleVersion="1.0.0"
+                   ExtensionBundleName="AutoCut">
+  <ExtensionList>
+    <Extension Id="com.autocut.bridge.panel" Version="1.0.0"/>
+    <Extension Id="com.autocut.bridge.agent" Version="1.0.0"/>
+  </ExtensionList>
+  <ExecutionEnvironment>
+    <HostList>
+      <Host Name="PPRO" Version="14.0"/>
+    </HostList>
+    <LocaleList>
+      <Locale Code="All"/>
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="9.0"/>
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList>
+    <Extension Id="com.autocut.bridge.panel">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./index.html</MainPath>
+          <ScriptPath>./host.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--allow-file-access-from-files</Parameter>
+            <Parameter>--enable-nodejs</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>false</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>AutoCut</Menu>
+          <Geometry>
+            <Size>
+              <Height>460</Height>
+              <Width>400</Width>
+            </Size>
+            <MinSize>
+              <Height>300</Height>
+              <Width>385</Width>
+            </MinSize>
+          </Geometry>
+          <Icons/>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+    <Extension Id="com.autocut.bridge.agent">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./bridge.html</MainPath>
+          <ScriptPath>./host.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--allow-file-access-from-files</Parameter>
+            <Parameter>--enable-nodejs</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>false</AutoVisible>
+          <StartOn>
+            <Event>com.adobe.csxs.events.ApplicationActivate</Event>
+            <Event>applicationActivate</Event>
+          </StartOn>
+        </Lifecycle>
+        <UI>
+          <Type>Custom</Type>
+          <Geometry>
+            <Size>
+              <Height>1</Height>
+              <Width>1</Width>
+            </Size>
+          </Geometry>
+          <Icons/>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>

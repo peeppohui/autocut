@@ -123,6 +123,9 @@ def load_timeline(path: Path) -> List[Dict]:
                 # дорожка: V1/V2/... для видео со связанным звуком,
                 # A2/A3/... для звука без картинки (подложка, закадр)
                 "track": (row.get("track") or "").strip().upper(),
+                # куда поставить клип на таймлайне (сек). Пусто = ровно
+                # после предыдущего клипа этой дорожки.
+                "pos": _num("pos"),
                 # второй ракурс того же момента - из него premiere.py
                 # кладёт вторую дорожку (--stacked). Пусто = одна камера.
                 "alt": (row.get("alt") or "").strip(),
@@ -327,7 +330,13 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     # и звуковая дорожка осталась бы пустой. Premiere отказывался импортировать
     # такой файл, а на первой звуковой дорожке ещё стоял totalExplodedTrackCount,
     # обещающий группу из нескольких дорожек.
-    linked_audio = {v: f"L:{v}" for v in vnames if v != ALT_TRACK}
+    # Дорожку второго ракурса из связанного звука исключаем: её клипы
+    # видео-only, без <link>, и звуковая дорожка осталась бы пустой.
+    # Premiere отказывался импортировать такой файл. Остальные дорожки
+    # (в том числе V2 под нарезку) звук получают.
+    stacked_track = (ALT_TRACK if stacked and any(c.get("alt") for c in clips)
+                     else None)
+    linked_audio = {v: f"L:{v}" for v in vnames if v != stacked_track}
 
     # самостоятельные звуковые дорожки: после связанных, в порядке появления
     extra_audio = []
@@ -392,13 +401,31 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         ET.SubElement(tr, "locked").text = "FALSE"
         extra_tracks.append(tr)
 
-    t = 0
+    # Таймлайн у каждой дорожки свой. Раньше часы были одни на все
+    # клипы, и нарезка, положенная на отдельную дорожку, уезжала за
+    # голосом. В эталонном проекте нарезка лежит на второй дорожке и
+    # перекрывает голос там, где надо.
+    tpos = {}
+
+    def track_key(c):
+        if audio_only(c):
+            return "A:" + c["track"]
+        return "V:" + vname_of(c)
+
     seq_markers = []
     for i, c in enumerate(clips, 1):
         orig, src_in, src_out, d = c["_orig"], c["_in"], c["_out"], c["_used"]
-        start, end = t, t + d
         only_audio = audio_only(c)
         vi = None
+        key = track_key(c)
+        start = c.get("pos")
+        if start is None:
+            start = tpos.get(key, 0)
+        else:
+            # колонка pos — в секундах, а таймлайн считается в кадрах
+            start = int(round(float(start) * fps))
+        end = start + d
+        tpos[key] = end
 
         if not only_audio:
             vtrack = vtracks[vname_of(c)]
@@ -510,7 +537,12 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
             ET.SubElement(link2, "trackindex").text = str(aindex[aname_of(c)])
             ET.SubElement(link2, "clipindex").text = "1"
 
-        t = end
+    # Длительность секвенции — конец самой длинной дорожки, а не сумма
+    # всех клипов: с раздельными таймлайнами сумма больше длительности.
+    total = max([v for v in tpos.values()] + [0])
+    dur_el = seq.find("duration")
+    if dur_el is not None:
+        dur_el.text = str(total)
 
     for k, (tr, afile) in enumerate(zip(extra_tracks, audios)):
         mc = {"file": Path(afile).name, "abspath": str(Path(afile).absolute())}
@@ -670,20 +702,41 @@ def write_pretty_xml(root: ET.Element, path: Path):
 
 def write_edl(clips: List[Dict], path: Path, fps: int = None,
               trim_rec: bool = False):
+    """EDL — запасной вариант, если XML не понравится Premiere.
+
+    EDL умеет несколько видеодорожек: в поле «трек» пишется V для
+    первой дорожки и A для второй (с привязкой к звуку первой). Так
+    нарезка и голос встают на разные дорожки, как в эталоне.
+    """
     fps = EXPORT_FPS if fps is None else fps
-    lines = [f"TITLE: {path.stem}", f"FCM: NON-DROP FRAME", ""]
-    rec = 0
+    lines = [f"TITLE: {path.stem}", "FCM: NON-DROP FRAME", ""]
+
+    def vch(c):
+        """Номер видеодорожки в EDL: 1 — первая, 2 — вторая.
+
+        Колея A привязана к звуку первой видеодорожки, поэтому вторая
+        видеодорожка идёт парой A/V с каналом 2.
+        """
+        track = (c.get("track") or "").upper()
+        return 2 if track in ("V2", "V3", "V4") else 1
+
+    rec = {1: 0, 2: 0}
     for i, c in enumerate(clips, 1):
         if "_used" in c:
             orig, src_in, src_out, d = c["_orig"], c["_in"], c["_out"], c["_used"]
         else:
             orig, src_in, src_out, d = take_window(c, fps, trim_rec)
-        rec_in, rec_out = rec, rec + d
+        ch = vch(c)
+        pos = c.get("pos")
+        rec_in = int(round(float(pos) * fps)) if pos is not None else rec[ch]
+        rec_out = rec_in + d
+        rec[ch] = rec_out
+        reel = (c["file"].rsplit(".", 1)[0] or "AX")[:8].upper()
         lines.append(
-            f"{i:03d}  AX       V     C        {tc(src_in, fps)} {tc(src_out, fps)} {tc(rec_in, fps)} {tc(rec_out, fps)}"
+            f"{i:03d}  {reel:<8} {'A' if ch == 2 else 'V'}     C        "
+            f"{tc(src_in, fps)} {tc(src_out, fps)} {tc(rec_in, fps)} {tc(rec_out, fps)}"
         )
         lines.append(f"* FROM CLIP NAME: {c['file']} [{c['plan']}|{c['hero']}]")
-        rec += d
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
