@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autocut.local/schemas/edit_plan.schema.json",
+  "title": "AutoCut edit plan",
+  "description": "План монтажа: история, точные куски, звук, титры и маркеры. Exporter компилирует его в FCP7 XML.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "genre",
+    "target_sec",
+    "fps",
+    "resolution",
+    "story",
+    "tracks",
+    "audio",
+    "markers",
+    "constraints",
+    "meta"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "genre": {
+      "type": "string",
+      "enum": ["digest", "interview", "news", "vertical"]
+    },
+    "target_sec": {"type": "number", "exclusiveMinimum": 0},
+    "fps": {"type": "number", "exclusiveMinimum": 0},
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1}
+      }
+    },
+    "story": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "beats"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "beats": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/beat"}
+        }
+      }
+    },
+    "tracks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["V1", "V2"],
+      "properties": {
+        "V1": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/video_clip"}
+        },
+        "V2": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/video_clip"}
+        },
+        "V3": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/video_clip"}
+        },
+        "V4": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/video_clip"}
+        }
+      }
+    },
+    "audio": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/audio_clip"}
+    },
+    "titles": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/title"}
+    },
+    "markers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/marker"}
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_duration_sec", "min_shot_sec", "max_shot_sec"],
+      "properties": {
+        "max_duration_sec": {"type": "number", "exclusiveMinimum": 0},
+        "min_shot_sec": {"type": "number", "exclusiveMinimum": 0},
+        "max_shot_sec": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generated_by", "created_at"],
+      "properties": {
+        "generated_by": {"type": "string"},
+        "model": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  },
+  "$defs": {
+    "beat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "goal", "start_sec", "end_sec"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "goal": {"type": "string", "minLength": 1},
+        "start_sec": {"type": "number", "minimum": 0},
+        "end_sec": {"type": "number", "exclusiveMinimum": 0},
+        "topics": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "video_clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "in", "out", "role", "beat", "reason"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^v[1-4]-[0-9]{3,}$"},
+        "source": {"type": "string", "minLength": 1},
+        "in": {"type": "number", "minimum": 0},
+        "out": {"type": "number", "exclusiveMinimum": 0},
+        "role": {
+          "type": "string",
+          "enum": ["standup", "interview", "broll", "graphics"]
+        },
+        "beat": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "shot_size": {
+          "type": "string",
+          "enum": ["detail", "close", "medium", "wide", "extra_wide", "unknown"]
+        },
+        "people": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "topic": {"type": "string"}
+      }
+    },
+    "audio_clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "track", "source", "in", "out"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^a[2-4]-[0-9]{3,}$"},
+        "track": {"type": "string", "enum": ["A2", "A3", "A4"]},
+        "source": {"type": "string", "minLength": 1},
+        "in": {"type": "number", "minimum": 0},
+        "out": {"type": "number", "exclusiveMinimum": 0},
+        "sync_to": {"type": "string"},
+        "offset_sec": {"type": "number"},
+        "gain_db": {"type": "number"},
+        "duck_db": {"type": "number"}
+      }
+    },
+    "title": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "in", "out", "style"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^t-[0-9]{3,}$"},
+        "text": {"type": "string", "minLength": 1},
+        "subtitle": {"type": "string"},
+        "in": {"type": "number", "minimum": 0},
+        "out": {"type": "number", "exclusiveMinimum": 0},
+        "style": {"type": "string", "enum": ["lower_third", "quote", "chapter"]},
+        "anchor": {"type": "string"}
+      }
+    },
+    "marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time", "name"],
+      "properties": {
+        "time": {"type": "number", "minimum": 0},
+        "name": {"type": "string", "minLength": 1},
+        "comment": {"type": "string"}
+      }
+    }
+  }
+}

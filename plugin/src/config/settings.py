@@ -60,6 +60,34 @@ def _normalize(node: Any) -> Any:
     return node
 
 
+def _coerce_value(old: Any, value: Any, dotted: str) -> Any:
+    """Приводит строку из окна к типу, который уже лежит в настройках.
+
+    Окно ввода отдаёт строки. Если записать "120" поверх числа 120,
+    файл станет обещать не тот тип: код прочитает его через float(),
+    а следующая правка через set_value уже не поймёт, число ли это.
+    """
+    if not isinstance(value, str) or old is None:
+        return value
+    if isinstance(old, bool):
+        low = value.strip().lower()
+        if low in ("true", "1", "да", "yes"):
+            return True
+        if low in ("false", "0", "нет", "no"):
+            return False
+        raise ValueError(f"Настройка «{dotted}» ждёт true/false, а не {value!r}")
+    if isinstance(old, (int, float)):
+        try:
+            number = float(value)
+        except ValueError:
+            raise ValueError(
+                f"Настройка «{dotted}» ждёт число, а не {value!r}") from None
+        if isinstance(old, int) and number.is_integer():
+            return int(number)
+        return number
+    return value
+
+
 def set_value(dotted: str, value: Any, *, path: Path | None = None) -> None:
     """Кладёт значение по точечному пути и сохраняет файл.
 
@@ -69,8 +97,10 @@ def set_value(dotted: str, value: Any, *, path: Path | None = None) -> None:
     весь пайплайн встанет.
     """
     target = Path(path) if path is not None else SETTINGS_PATH
-    data = load(target, refresh=True)
     parts = dotted.split(".")
+    if not dotted or any(not part for part in parts):
+        raise ValueError("Пустой путь настройки")
+    data = load(target, refresh=True)
     node: Any = data
     for part in parts[:-1]:
         nxt = node.get(part)
@@ -78,11 +108,13 @@ def set_value(dotted: str, value: Any, *, path: Path | None = None) -> None:
             nxt = {}
             node[part] = nxt
         node = nxt
-    node[parts[-1]] = value
+    node[parts[-1]] = _coerce_value(node.get(parts[-1]), value, dotted)
 
     tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
+    # newline="\n" обязателен: в репозитории LF, а write_text на Windows
+    # иначе переписывает весь файл в CRLF.
+    with tmp.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     tmp.replace(target)
 
     global _cache

@@ -4,6 +4,13 @@ __pycache__/
 .venv/
 venv/
 
+# Локальные портативные рантаймы: Python, Node, ffmpeg/ffprobe.
+# Ставятся в .tools для проверки и не должны попадать в историю.
+.tools/
+plugin/autocut_engine.log
+plugin/_engine_test.*
+plugin/premiere_panel/.debug
+
 # Модель качается сама (ultralytics), в репозитории не храним
 yolov8n-pose.pt
 
@@ -39,6 +46,7 @@ plugin/autocut_result.json
 digest_out/
 interview_out/
 review_out/
+vertical_out/
 synced/
 rz/
 timeline*.csv

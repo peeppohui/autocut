@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autocut.local/schemas/media_index.schema.json",
+  "title": "AutoCut media index",
+  "description": "Факты о материале: источники, сегменты, речь, качество, люди и темы. Индекс не содержит монтажных решений.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "created_at", "project", "sources", "segments"],
+  "properties": {
+    "version": {"const": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "genre", "fps", "width", "height"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1},
+        "genre": {"type": "string", "enum": ["digest", "interview", "news", "vertical"]},
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "language": {"type": "string", "default": "ru"}
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "sources": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/source"}
+    },
+    "segments": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/segment"}
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "role",
+        "duration_sec",
+        "sha1",
+        "mtime_ns",
+        "size_bytes",
+        "width",
+        "height",
+        "fps"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "role": {
+          "type": "string",
+          "enum": ["standup", "interview", "broll", "music", "graphics", "unknown"]
+        },
+        "duration_sec": {"type": "number", "minimum": 0},
+        "sha1": {"type": "string", "minLength": 1},
+        "mtime_ns": {"type": "integer", "minimum": 0},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "camera": {"type": "string"},
+        "has_speech": {"type": "boolean"},
+        "error": {"type": "string"}
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_id", "start", "end", "duration_sec"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "source_id": {"type": "string", "minLength": 1},
+        "start": {"type": "number", "minimum": 0},
+        "end": {"type": "number", "exclusiveMinimum": 0},
+        "duration_sec": {"type": "number", "exclusiveMinimum": 0},
+        "shot_size": {
+          "type": "string",
+          "enum": ["detail", "close", "medium", "wide", "extra_wide", "unknown"]
+        },
+        "quality": {"$ref": "#/$defs/quality"},
+        "text": {"type": "string"},
+        "topics": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "people": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/person"}
+        },
+        "description": {"type": "string"},
+        "audio_events": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "embedding_ref": {"type": "string"}
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sharpness", "shake_px", "usable"],
+      "properties": {
+        "sharpness": {"type": "number", "minimum": 0},
+        "shake_px": {"type": "number", "minimum": 0},
+        "exposure": {"type": "number"},
+        "black_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+        "usable": {"type": "boolean"}
+      }
+    },
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "face_frac": {"type": "number", "minimum": 0, "maximum": 1},
+        "speaking": {"type": "boolean"}
+      }
+    }
+  }
+}

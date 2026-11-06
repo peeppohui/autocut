@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent
@@ -235,6 +236,27 @@ def build_server():
         return {"ok": bool(res.get("ok")), "ответ": res.get("данные")}
 
     return srv
+
+
+def serve_bridge() -> int:
+    """Держать только HTTP-мост, без MCP stdio.
+
+    Панель запускает движок сама и не говорит с ним по stdio: stdin у
+    detached-процесса закрыт, и MCP-сервер сразу завершается. Поэтому
+    для панели нужен режим, где живёт только мост.
+    """
+    port = bridge.start()
+    if port:
+        print("мост в Premiere: http://127.0.0.1:{}".format(port),
+              file=sys.stderr, flush=True)
+    else:
+        print("мост в Premiere не поднялся: порты заняты", file=sys.stderr,
+              flush=True)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        return 0
 
 
 def main(argv=None) -> int:

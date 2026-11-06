@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -20,10 +21,15 @@ MARK = re.compile(r"([A-Z][A-Z0-9 ]*)\s+OK\s*$", re.M)
 
 
 def run(path: Path, timeout: int = 300):
+    env = dict(os.environ)
+    # Дочерний python на Windows печатает в кодировку консоли, а вывод
+    # разбирается как utf-8. Пусть печатает utf-8 независимо от консоли.
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     try:
         p = subprocess.run([sys.executable, str(path)], capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout)
+                           timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         # тест завис (например, открыл модальное окно). Раньше такой
         # случай молчал и прогон висел вместе с ним.
@@ -35,6 +41,11 @@ def run(path: Path, timeout: int = 300):
 
 
 def main() -> int:
+    # Ошибка кодирования в строке упавшего теста не должна убивать
+    # прогон: иначе вместо «тест упал» человек видит UnicodeEncodeError.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     files = sorted(TESTS.glob("test_*.py"))
     if not files:
         print("Тестов нет")

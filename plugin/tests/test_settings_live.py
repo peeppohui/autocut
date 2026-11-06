@@ -12,6 +12,7 @@
 """
 import json
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -74,6 +75,10 @@ missing = sorted(dotted - all_paths)
 
 ok("в settings.json нет нечитаемых ключей", not dead, str(dead))
 ok("все ключи, которые читает код, есть в файле", not missing, str(missing))
+ok("digest.target_sec — число",
+   isinstance(cfg.get("digest", {}).get("target_sec"), (int, float))
+   and not isinstance(cfg["digest"]["target_sec"], bool),
+   repr(cfg.get("digest", {}).get("target_sec")))
 ok("шапка файла не врёт про чтение",
    "ничего не читается" not in
    (cfg.get("_readme") or [""])[0].lower()
@@ -105,6 +110,23 @@ with tempfile.TemporaryDirectory() as td:
               "interview.target_sec", "interview_cuts.shot_optimal_min_sec"):
         v = settings.get(k, None)
         ok(f"ключ {k} читается и не пуст", v is not None, str(v))
+
+    tmp = Path(td) / "settings.json"
+    shutil.copyfile(SRC / "config" / "settings.json", tmp)
+    settings.set_value("digest.target_sec", "120", path=tmp)
+    cfg2 = json.loads(tmp.read_text(encoding="utf-8"))
+    ok("set_value сохраняет тип числа",
+       isinstance(cfg2["digest"]["target_sec"], int),
+       repr(cfg2["digest"]["target_sec"]))
+    ok("set_value пишет LF, а не CRLF",
+       b"\r\n" not in tmp.read_bytes(), "найден CRLF")
+    try:
+        settings.set_value("", "1", path=tmp)
+        empty_raised = False
+    except ValueError:
+        empty_raised = True
+    ok("set_value не создаёт пустой ключ", empty_raised, "исключения не было")
+    ok("пустого ключа в файле нет", "" not in cfg2, repr(cfg2.get("")))
 
 print()
 if fail:

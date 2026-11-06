@@ -205,6 +205,51 @@ with tempfile.TemporaryDirectory() as td:
        str([tr.attrib for tr in st_at]))
 
     # =========================================================
+    # Звук рекордера: в плане исходный REC и его собственные in/out,
+    # а не нарезанный WAV. Все куски одного рекордера должны лежать
+    # на одной A2, иначе каждый вырезанный файл создаёт свою дорожку.
+    # =========================================================
+    rec1 = td / "REC00016.WAV"
+    rec2 = td / "REC00006.WAV"
+    for p in (rec1, rec2):
+        p.write_bytes(b"\x00" * 16)
+
+    rec_csv = td / "rec.csv"
+    with open(rec_csv, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["file", "plan", "hero", "duration", "in", "out",
+                    "desc", "path", "audio", "track", "audio_in",
+                    "audio_out", "audio_duration", "audio_track"])
+        w.writerow(["cam.mp4", "средний2", "гость", 4.0, 1, 5,
+                    "ГОСТЬ: речь", str(a), str(rec1), "V1", 6.2, 10.2,
+                    60.0, "A2"])
+        w.writerow(["cam.mp4", "средний2", "гость", 4.0, 5, 9,
+                    "ГОСТЬ: речь", str(a), str(rec1), "V1", 20.2, 24.2,
+                    60.0, "A2"])
+        w.writerow(["cam.mp4", "средний2", "гость", 4.0, 9, 13,
+                    "ГОСТЬ: речь", str(a), str(rec2), "V1", 451.76, 455.76,
+                    600.0, "A2"])
+
+    rec_clips = premiere.resolve_media(
+        premiere.load_timeline(rec_csv), td)
+    rec_xml = premiere.build_fcp7(list(rec_clips), fps=25)
+    rec_at = rec_xml.findall(".//audio/track")
+    ok("рекордер занимает одну дорожку A2", len(rec_at) == 1,
+       str(len(rec_at)))
+    rec_items = rec_at[0].findall("clipitem") if rec_at else []
+    ok("все куски рекордера на одной дорожке", len(rec_items) == 3,
+       str(len(rec_items)))
+    pairs = [(c.findtext("in"), c.findtext("out")) for c in rec_items]
+    ok("in/out звука взяты из рекордера, а не из камеры",
+       pairs == [("155", "255"), ("505", "605"), ("11294", "11394")],
+       str(pairs))
+    fdurs = [c.findtext("file/duration") for c in rec_items]
+    ok("длительность файла — исходника, а не камерного куска",
+       fdurs == ["1500", "1500", "15000"], str(fdurs))
+    ok("XML с рекордером проходит check_xml",
+       not premiere.check_xml(rec_xml), str(premiere.check_xml(rec_xml)))
+
+    # =========================================================
     # Раскладку правят руками, часто в Excel. Лишняя запятая в строке
     # даёт колонок больше, чем в заголовке, и DictReader складывает их
     # в список. Раньше экспорт на этом падал с AttributeError - то

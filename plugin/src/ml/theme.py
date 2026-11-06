@@ -178,7 +178,10 @@ def score_text(sentence: str, text: str, weights) -> float:
     if not t:
         return 0.0
     s = sum(weights.get(w, 1.0) for w in (q & t))
-    return s / sum(weights.get(w, 1.0) for w in q)
+    total = sum(weights.get(w, 1.0) for w in q)
+    # Один документ в наборе даёт IDF = 0 у всех слов: делить не на что.
+    # Это не ошибка входа, а честный ноль — общих значимых слов нет.
+    return s / total if total else 0.0
 
 
 # --- нейросетевое сопоставление ---

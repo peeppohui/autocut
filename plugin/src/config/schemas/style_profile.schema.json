@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autocut.local/schemas/style_profile.schema.json",
+  "title": "AutoCut style profile",
+  "description": "Профиль монтажного стиля, снятый с готового проекта Premiere. Используется Director и Editor как вкусовая рамка.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "genre",
+    "source_project",
+    "duration_sec",
+    "shares",
+    "cut_length",
+    "music",
+    "titles"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "genre": {"type": "string", "enum": ["digest", "interview", "news", "vertical"]},
+    "source_project": {"type": "string", "minLength": 1},
+    "duration_sec": {"type": "number", "exclusiveMinimum": 0},
+    "shares": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["standup", "broll", "interview"],
+      "properties": {
+        "standup": {"type": "number", "minimum": 0, "maximum": 1},
+        "broll": {"type": "number", "minimum": 0, "maximum": 1},
+        "interview": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "cut_length": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["standup", "broll", "interview"],
+      "properties": {
+        "standup": {"$ref": "#/$defs/range"},
+        "broll": {"$ref": "#/$defs/range"},
+        "interview": {"$ref": "#/$defs/range"}
+      }
+    },
+    "shot_size_sequence": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["detail", "close", "medium", "wide", "extra_wide", "unknown"]
+      }
+    },
+    "music": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bed_db", "duck_db", "fade_sec"],
+      "properties": {
+        "bed_db": {"type": "number"},
+        "duck_db": {"type": "number"},
+        "fade_sec": {"type": "number", "minimum": 0}
+      }
+    },
+    "titles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_sec", "style"],
+      "properties": {
+        "min_sec": {"type": "number", "minimum": 0},
+        "style": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "median", "max"],
+      "properties": {
+        "min": {"type": "number", "minimum": 0},
+        "median": {"type": "number", "minimum": 0},
+        "max": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}

@@ -52,7 +52,7 @@
           </CEFCommandLine>
         </Resources>
         <Lifecycle>
-          <AutoVisible>false</AutoVisible>
+          <AutoVisible>true</AutoVisible>
         </Lifecycle>
         <UI>
           <Type>Panel</Type>
@@ -64,7 +64,7 @@
             </Size>
             <MinSize>
               <Height>300</Height>
-              <Width>385</Width>
+              <Width>310</Width>
             </MinSize>
           </Geometry>
           <Icons/>

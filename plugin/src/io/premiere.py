@@ -120,6 +120,14 @@ def load_timeline(path: Path) -> List[Dict]:
                 # звук для A1 отдельно (микрофон говорящего из interview.py);
                 # пусто = звук из видеофайла
                 "audio": (row.get("audio") or "").strip(),
+                # собственные края звука. Нужны рекордеру: исходный REC
+                # длиннее камерного куска, и его in/out не равны видео.
+                "audio_in": _num("audio_in"),
+                "audio_out": _num("audio_out"),
+                "audio_duration": _num("audio_duration"),
+                # дорожка для отдельного звука (A2/A3/...); пусто = по имени
+                # источника, как у раздельных микрофонов интервью
+                "audio_track": (row.get("audio_track") or "").strip().upper(),
                 # дорожка: V1/V2/... для видео со связанным звуком,
                 # A2/A3/... для звука без картинки (подложка, закадр)
                 "track": (row.get("track") or "").strip().upper(),
@@ -348,17 +356,27 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     # с двумя микрофонами общая дорожка смешивала ведущего и гостя, и в
     # постпродакшне их уже не развести. Теперь у каждого микрофона своя
     # дорожка, и реплика лежит там, где именно этот микрофон звучит.
+    #
+    # Явная audio_track (дайджест: A2 для рекордера) важнее имени файла:
+    # иначе каждый вырезанный кусок создавал бы отдельную дорожку.
     anames = []
     mic_of = {}
     for c in clips:
         if audio_only(c):
             continue
-        src = c.get("audio")
-        name = f"M:{Path(src).name}" if src else linked_audio[vname_of(c)]
+        track = c.get("audio_track")
+        if track in AUDIO_TRACKS:
+            name = f"X:{track}"
+        else:
+            src = c.get("audio")
+            name = f"M:{Path(src).name}" if src else linked_audio[vname_of(c)]
         if name not in anames:
             anames.append(name)
         mic_of[id(c)] = name
-    anames += [f"X:{n}" for n in extra_audio]
+    for n in extra_audio:
+        name = f"X:{n}"
+        if name not in anames:
+            anames.append(name)
     # в <link> индекс дорожки считается с единицы и в порядке объявления
     aindex = {name: k + 1 for k, name in enumerate(anames)}
 
@@ -523,11 +541,30 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         ai.append(_rate_el(fps))
         ET.SubElement(ai, "start").text = str(start)
         ET.SubElement(ai, "end").text = str(end)
-        ET.SubElement(ai, "in").text = str(src_in)
-        ET.SubElement(ai, "out").text = str(src_out)
+
+        # У рекордера свои края: исходный REC длиннее камерного куска,
+        # и камерный in/out в нём означал бы другое место. Длительность
+        # на таймлайне равна видео, поэтому out = in + d: округление
+        # до кадров не должно развести звук и картинку.
+        a_in = c.get("audio_in")
+        a_dur = c.get("audio_duration")
+        if a_in is not None:
+            a_in_f = frames(a_in, fps)
+            a_out_f = a_in_f + d
+            if a_dur and a_dur > 0:
+                a_orig_f = frames(a_dur, fps)
+            else:
+                a_orig_f = a_out_f
+            a_orig_f = max(a_orig_f, a_out_f)
+        else:
+            a_in_f, a_out_f = src_in, src_out
+            a_orig_f = max(orig, src_out)
+
+        ET.SubElement(ai, "in").text = str(a_in_f)
+        ET.SubElement(ai, "out").text = str(a_out_f)
         ai.append(_audio_file_el(f"file-{i}a",
                                  {"file": aname, "abspath": aabspath},
-                                 max(orig, src_out), fps))
+                                 a_orig_f, fps))
         ET.SubElement(ai, "sourcetrack").append(_audio_track_el())
         if vi is not None:
             link2 = ET.SubElement(ai, "link")

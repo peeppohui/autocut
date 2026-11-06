@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "genre": "digest",
+  "target_sec": 120,
+  "fps": 25,
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "story": {
+    "title": "Выходи решать",
+    "beats": [
+      {
+        "id": "hook",
+        "goal": "зацепить зрителя сильным кадром",
+        "start_sec": 0,
+        "end_sec": 12,
+        "topics": ["мероприятие"]
+      },
+      {
+        "id": "context",
+        "goal": "объяснить, что происходит",
+        "start_sec": 12,
+        "end_sec": 30,
+        "topics": ["наука"]
+      },
+      {
+        "id": "event",
+        "goal": "показать мероприятие",
+        "start_sec": 30,
+        "end_sec": 78,
+        "topics": ["опыты", "выставка"]
+      },
+      {
+        "id": "voices",
+        "goal": "дать голоса участникам",
+        "start_sec": 78,
+        "end_sec": 108,
+        "topics": ["искусственный интеллект"]
+      },
+      {
+        "id": "close",
+        "goal": "закрыть историю",
+        "start_sec": 108,
+        "end_sec": 120,
+        "topics": ["мероприятие"]
+      }
+    ]
+  },
+  "tracks": {
+    "V1": [
+      {
+        "id": "v1-001",
+        "source": "исх/стендап/C0101.MP4",
+        "in": 0.0,
+        "out": 3.2,
+        "role": "standup",
+        "beat": "hook",
+        "reason": "корреспондент сразу в кадре, речь без запинки",
+        "shot_size": "medium",
+        "people": ["корреспондент"],
+        "topic": "мероприятие"
+      },
+      {
+        "id": "v1-002",
+        "source": "исх/интервью/C0098.MP4",
+        "in": 185.0,
+        "out": 191.2,
+        "role": "interview",
+        "beat": "voices",
+        "reason": "сильный ответ про искусственный интеллект",
+        "shot_size": "close",
+        "people": ["спикер 1"],
+        "topic": "искусственный интеллект"
+      }
+    ],
+    "V2": [
+      {
+        "id": "v2-001",
+        "source": "исх/нарезка/C0011.MP4",
+        "in": 2.0,
+        "out": 3.5,
+        "role": "broll",
+        "beat": "context",
+        "reason": "иллюстрирует тему опытов",
+        "shot_size": "wide",
+        "people": [],
+        "topic": "опыты"
+      },
+      {
+        "id": "v2-002",
+        "source": "исх/нарезка/C0024.MP4",
+        "in": 5.4,
+        "out": 7.1,
+        "role": "broll",
+        "beat": "event",
+        "reason": "крупный план стенда",
+        "shot_size": "close",
+        "people": [],
+        "topic": "выставка"
+      }
+    ]
+  },
+  "audio": [
+    {
+      "id": "a2-001",
+      "track": "A2",
+      "source": "звк/REC00016.WAV",
+      "in": 6.2,
+      "out": 9.4,
+      "sync_to": "v1-001",
+      "offset_sec": 6.2,
+      "gain_db": 0.0
+    },
+    {
+      "id": "a2-002",
+      "track": "A2",
+      "source": "звк/REC00006.WAV",
+      "in": 451.76,
+      "out": 457.96,
+      "sync_to": "v1-002",
+      "offset_sec": 266.76,
+      "gain_db": 0.0
+    },
+    {
+      "id": "a3-001",
+      "track": "A3",
+      "source": "music/the_sims_4_01.mp3",
+      "in": 0.0,
+      "out": 120.0,
+      "gain_db": -6.0,
+      "duck_db": -12.0
+    }
+  ],
+  "titles": [
+    {
+      "id": "t-001",
+      "text": "Иван Иванов",
+      "subtitle": "корреспондент",
+      "in": 2.0,
+      "out": 8.0,
+      "style": "lower_third",
+      "anchor": "v1-001"
+    }
+  ],
+  "markers": [
+    {
+      "time": 0.0,
+      "name": "hook",
+      "comment": "начало истории"
+    },
+    {
+      "time": 78.0,
+      "name": "voices",
+      "comment": "переход к интервью"
+    }
+  ],
+  "constraints": {
+    "max_duration_sec": 126,
+    "min_shot_sec": 1.2,
+    "max_shot_sec": 6.0
+  },
+  "meta": {
+    "generated_by": "autoedit/0.1",
+    "model": "qwen2.5-7b-instruct",
+    "created_at": "2026-10-24T12:00:00+03:00"
+  }
+}

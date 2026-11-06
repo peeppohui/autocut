@@ -1,330 +1,74 @@
-// Панель AutoCut: связь с Premiere и с сервером AutoCut.
+// Панель AutoCut в Premiere Pro.
 //
-// Панель сама ничего не решает. Она:
-//   1) находит сервер AutoCut (http://127.0.0.1:8931-8933) и забирает
-//      команду, если она есть;
-//   2) выполняет команду в Premiere через ExtendScript;
-//   3) отправляет результат обратно на сервер.
+// Панель — интерфейс. Тяжёлое делает движок AutoCut (тот же, что
+// отвечает по MCP), панель спрашивает его по HTTP и показывает ход
+// работы. Готовая рыба импортируется в проект отсюда: человеку не
+// нужно ничего кликать в Premiere.
 //
-// Про запросы — через Node (--enable-nodejs), а не через fetch: панель
-// живёт в file://, и браузерный fetch к http://127.0.0.1 упирается в
-// CORS. Node ходит без этих заморочек. Если Node недоступен —
-// откатываемся на fetch.
+// Про запросы — через Node (--enable-nodejs): панель живёт в file://,
+// и браузерный fetch к http://127.0.0.1 упирается в CORS.
 
 var PORTS = [8931, 8932, 8933];
 var PORT = 0;
-var POLL_MS = 1200;
+var PORT_INDEX = 0;
+var POLL_MS = 1500;
+var TASK = "";            // номер текущей фоновой задачи
+var TIMER = null;
 
+// В CEP Node бывает в трёх местах: глобальный require, cep_node.require
+// и window.require. В Premiere 26 window.require пуст, поэтому старый
+// вариант молча оставался без Node: панель рисовалась, но не могла
+// ни запустить движок, ни прочитать результат ExtendScript.
+function nodeRequire(name) {
+  try {
+    if (typeof require !== "undefined") { return require(name); }
+  } catch (e) { }
+  try {
+    var cep = (typeof cep_node !== "undefined") ? cep_node :
+              (typeof window !== "undefined" ? window.cep_node : null);
+    if (cep && typeof cep.require === "function") { return cep.require(name); }
+  } catch (e) { }
+  try {
+    if (typeof window !== "undefined" && window.require) {
+      return window.require(name);
+    }
+  } catch (e) { }
+  return null;
+}
+
+// Node-http в CEP зависает на 127.0.0.1: запрос уходит и не возвращается
+// ни ошибкой, ни ответом. Fetch из той же панели работает, а мост отдаёт
+// Access-Control-Allow-Origin: *, поэтому ходим через него.
 var NODE_HTTP = null;
-var NODE_CEP = null;
-try {
-  if (window.require) {
-    NODE_HTTP = window.require("http");
-    try { NODE_CEP = window.require("cep"); } catch (e2) { NODE_CEP = null; }
-  }
-} catch (e) { NODE_HTTP = null; }
+var NODE_BUFFER = nodeRequire("buffer");
+var BUF = (NODE_BUFFER && NODE_BUFFER.Buffer) ? NODE_BUFFER.Buffer :
+          (typeof Buffer !== "undefined" ? Buffer : null);
 
 function log(text, cls) {
-  sendLog(text);
   var box = document.getElementById("log");
   if (!box) { return; }
   var line = document.createElement("div");
   if (cls) { line.className = cls; }
   line.textContent = text;
   box.appendChild(line);
-  while (box.childNodes.length > 300) { box.removeChild(box.firstChild); }
+  while (box.childNodes.length > 400) { box.removeChild(box.firstChild); }
   box.scrollTop = box.scrollHeight;
+  sendLog(text);
 }
 
-// --- ExtendScript внутри Premiere ---------------------------------------
-//
-// ГЛАВНОЕ: в CEP 9+ у __adobe_cep__.evalScript ЕСТЬ колбэк. Без него
-// результат молча выбрасывается (приходит undefined), а сам вызов
-// ещё и подвисает. Это ровно то, что мешало: панель замирала на
-// первой же команде.
-//
-// Скрипт всегда оборачивается так, чтобы результат лежал в
-// переменной: evalScript отдаёт значение последнего выражения, и на
-// сложном скрипте (функция, try/catch) это значение теряется.
-function runScript(script, cb, timeoutMs) {
-  var wrapped =
-    "(function(){ try { __autocut_last__ = " + script +
-    "; } catch(e) { __autocut_last__ = 'ERR|' + e.toString(); } })();";
-  var read = "String(__autocut_last__);";
-  var done = false;
-
-  function finish(res) {
-    if (done) { return; }
-    done = true;
-    clearTimeout(timer);
-    if (res === undefined || res === null) {
-      cb("ERR|пустой ответ");
-    } else {
-      cb(String(res));
-    }
-  }
-
-  var limit = timeoutMs || 15000;
-  var timer = setTimeout(function () {
-    if (done) { return; }
-    done = true;
-    cb("ERR|ExtendScript не ответил за " + Math.round(limit / 1000) + " с");
-  }, limit);
-
-  if (!window.__adobe_cep__ || !window.__adobe_cep__.evalScript) {
-    finish("ERR|панель не в Premiere");
-    return;
-  }
-  try {
-    window.__adobe_cep__.evalScript(wrapped, function () {
-      if (done) { return; }
-      window.__adobe_cep__.evalScript(read, function (res) {
-        finish(res);
-      });
-    });
-  } catch (e) {
-    finish("ERR|" + e);
-  }
-}
-
-// Лог панели уходит на сервер: состояние панели видно из агента, а не
-// только глазами на экране Premiere.
 var LOG_PENDING = [];
-
 function sendLog(text) {
   LOG_PENDING.push(String(text));
-  if (LOG_PENDING.length > 40) { LOG_PENDING.shift(); }
+  if (LOG_PENDING.length > 30) { LOG_PENDING.shift(); }
   if (!PORT) { return; }
   var chunk = LOG_PENDING.join("\n");
   LOG_PENDING = [];
   httpCall("POST", "/log", chunk, function () {});
 }
 
-// В Premiere 26 clip.start — объект времени, а не число: toFixed у него
-// нет, и разбор падал на первом же клипе.
-function fmt(v) {
-  try { return Number(v).toFixed(2); } catch (e) { return String(v); }
-}
-
-function winPath(p) {
-  return String(p).replace(/\\/g, "/");
-}
-
-function q(s) {
-  return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
-}
-
-// --- команды ------------------------------------------------------------
-//
-// Каждая команда получает аргументы и колбэк: запуск ExtendScript
-// асинхронный, и ответ уходит сразу после него.
-
-var COMMANDS = {
-  // Диагностика: чем именно мы говорим с Premiere.
-  diag: function (args, cb) {
-    var info = "node=" + (NODE_HTTP ? "да" : "нет") +
-               " cep=" + (NODE_CEP ? "да" : "нет") +
-               " native=" + (window.__adobe_cep__ && window.__adobe_cep__.evalScript
-                             ? "да" : "нет") +
-               " порт=" + (PORT || "-");
-    runScript("'версия ' + app.version", function (res) {
-      cb(info + " | ExtendScript: " + res);
-    });
-  },
-
-  // Импорт готовой рыбы. Главная команда: XML кладёт в проект и создаёт
-  // секвенцию, и человеку не надо ничего кликать.
-  //
-  // В ExtendScript Premiere 26 метода importXML НЕТ — проверено списком
-  // имён. Зато есть app.project.importFiles: он берёт файл и сам
-  // разбирается, что это. С FCP7 XML Premiere делает из него секвенцию
-  // — ровно то, что нужно.
-  import_xml: function (args, cb) {
-    var p = winPath(args.path || "");
-    if (!p) { cb("ERR|не указан путь"); return; }
-    runScript(
-      "(function(){try{" +
-      "var f=new File(" + q(p) + ");" +
-      "if(!f.exists){return 'ERR|нет файла ' + f.fsName;}" +
-      // Именно строка в массиве: с объектом File Premiere ругается
-
-      // «Illegal Parameter type». Проверено перебором вариантов.
-
-      "var r=app.project.importFiles([f.fsName]);" +
-      "var n=0; try{n=r.length;}catch(e){}" +
-      "var seqs=app.project.sequences, names='';" +
-      "for(var i=0;i<seqs.length;i++){names+=' | '+seqs[i].name;}" +
-      "return 'OK|секвенций в проекте: '+seqs.length+names;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb, 180000);
-  },
-
-  // Что вообще есть в API Premiere: перечисляем свойства app и app.project.
-  api: function (args, cb) {
-    runScript(
-      "(function(){try{" +
-      "var o='', k, p=app.project;" +
-      "for(k in p){o+='P.'+k+' ';} o+='|| ';" +
-      "for(k in app){o+='A.'+k+' ';} " +
-      "return 'OK|' + o;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
-  },
-
-  // Есть ли методы у проекта: for..in показывает только данные.
-  api_methods: function (args, cb) {
-    runScript(
-      "(function(){try{return 'OK|' + " +
-      "typeof app.project.importXML + '|' + " +
-      "typeof app.project.createSequence + '|' + " +
-      "typeof app.project.importFile + '|' + " +
-      "typeof app.project.executeMenuCommand + '|' + " +
-      "typeof app.executeMenuCommand + '|' + " +
-      "typeof app.projectManager + '|' + " +
-      "typeof app.project.rootItem;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
-  },
-
-  // Второй веер кандидатов: у Premiere в ExtendScript имена другие.
-  api_methods2: function (args, cb) {
-    runScript(
-      "(function(){try{var p=app.project, a=app, o='';" +
-      "o+='createSequence='+(typeof p.createSequence)+';';" +
-      "o+='createBin='+(typeof p.createBin)+';';" +
-      "o+='createItem='+(typeof p.createItem)+';';" +
-      "o+='openSequence='+(typeof p.openSequence)+';';" +
-      "o+='importFiles='+(typeof p.importFiles)+';';" +
-      "o+='importXML='+(typeof p.importXML)+';';" +
-      "o+='insertSequence='+(typeof p.insertSequence)+';';" +
-      "o+='saveAs='+(typeof p.saveAs)+';';" +
-      "o+='newSequence='+(typeof a.newSequence)+';';" +
-      "o+='newProject='+(typeof a.newProject)+';';" +
-      "o+='openDocument='+(typeof a.openDocument)+';';" +
-      "o+='pm.importFiles='+(typeof a.projectManager.importFiles)+';';" +
-      "o+='pm.openDocument='+(typeof a.projectManager.openDocument)+';';" +
-      "o+='pm.createProject='+(typeof a.projectManager.createProject)+';';" +
-      "o+='pm.projects='+(typeof a.projectManager.projects)+';';" +
-      "return 'OK|' + o;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
-  },
-
-  // Открыть проект. Без открытого проекта импортировать некуда, а
-  // Premiere после запуска может остаться с пустым проектом.
-  open_project: function (args, cb) {
-    var p = winPath(args.path || "");
-    if (!p) { cb("ERR|не указан путь"); return; }
-    runScript(
-      "(function(){try{" +
-      "var f=new File(" + q(p) + ");" +
-      "if(!f.exists){return 'ERR|нет файла ' + f.fsName;}" +
-      // openDocument в Premiere ждёт строку: с объектом File он ругается
-      // «Illegal Parameter type».
-      "var d=app.openDocument(f.fsName);" +
-      "return 'OK|открыт проект: ' + d.name;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
-  },
-
-  // Открыть секвенцию в таймлайне: после импорта она лежит в проекте,
-  // но активной не значится.
-  open_sequence: function (args, cb) {
-    var name = String(args.name || "");
-    if (!name) { cb("ERR|не указано имя секвенции"); return; }
-    runScript(
-      "(function(){try{" +
-      "var p=app.project, s, out='';" +
-      // Способы разные: openSequence у проекта, у приложения и с путём.
-      "try{ p.openSequence(" + q(name) + "); }catch(e){ out+='project.openSequence: '+e+'; '; }" +
-      "s=p.activeSequence;" +
-      "if(!s){ try{ app.openSequence(" + q(name) + "); }catch(e){ out+='app.openSequence: '+e+'; '; } s=p.activeSequence; }" +
-      "if(!s){ var q2=p.sequences;" +
-      "  for(var i=0;i<q2.length;i++){ if(q2[i].name===" + q(name) + "){ try{ p.openSequence(q2[i].name); }catch(e){} } }" +
-      "  s=p.activeSequence; }" +
-      "return 'OK|активная: ' + (s ? s.name : 'нет') + out;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb, 30000);
-  },
-
-  // Что в проекте: имя, секвенции, активная.
-  project_info: function (args, cb) {
-    runScript(
-      "(function(){try{" +
-      "var p=app.project, s='', i;" +
-      "s+='Проект: ' + p.name + '\\n';" +
-      "s+='Файл: ' + p.path + '\\n';" +
-      "s+='Секвенций: ' + p.sequences.length + '\\n';" +
-      "for(i=0;i<p.sequences.length;i++){s+='  - ' + p.sequences[i].name + '\\n';}" +
-      "if(p.activeSequence){s+='Активная: ' + p.activeSequence.name + '\\n';}" +
-      "return 'OK|' + s;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
-  },
-
-  // Все секвенции проекта с клипами по дорожкам: проверять, что импорт
-  // лёг куда надо.
-  sequences: function (args, cb) {
-    runScript(
-      "(function(){try{" +
-      "var out='', i, t, c, tr, cl, s;" +
-      "var f=function(v){ if(typeof v==='number'){return v.toFixed(2);} if(v&&typeof v.seconds==='number'){return v.seconds.toFixed(2);} if(v&&typeof v.value==='number'){return v.value.toFixed(2);} return String(v); };" +
-      "for(i=0;i<app.project.sequences.length;i++){" +
-      "s=app.project.sequences[i];" +
-      "out+='СЕКВЕНЦИЯ ' + s.name + '\\n';" +
-      "for(t=0;t<s.videoTracks.length;t++){" +
-      "tr=s.videoTracks[t];" +
-      "for(c=0;c<tr.clips.length;c++){" +
-      "cl=tr.clips[c];" +
-      "out+='  V' + (t+1) + ' ' + cl.name + ' [' + f(cl.start) + '..' + f(cl.end) + '] тип=' + (typeof cl.start) + '\\n';" +
-      "}}" +
-      "for(t=0;t<s.audioTracks.length;t++){" +
-      "tr=s.audioTracks[t];" +
-      "for(c=0;c<tr.clips.length;c++){" +
-      "cl=tr.clips[c];" +
-      "out+='  A' + (t+1) + ' ' + cl.name + ' [' + f(cl.start) + '..' + f(cl.end) + ']\\n';" +
-      "}}" +
-      "}" +
-      "return 'OK|' + out;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb, 30000);
-  },
-
-  // Клипы активной секвенции: что монтажёр увидит после импорта.
-  sequence_clips: function (args, cb) {
-    runScript(
-      "(function(){try{" +
-      "var seq=app.project.activeSequence;" +
-      "if(!seq){return 'ERR|нет активной секвенции';}" +
-      "var out='Секвенция: ' + seq.name + '\\n', t, c, tr, cl;" +
-      "var f=function(v){ if(typeof v==='number'){return v.toFixed(2);} if(v&&typeof v.seconds==='number'){return v.seconds.toFixed(2);} if(v&&typeof v.value==='number'){return v.value.toFixed(2);} return String(v); };" +
-      "for(t=0;t<seq.videoTracks.length;t++){" +
-      "tr=seq.videoTracks[t];" +
-      "for(c=0;c<tr.clips.length;c++){" +
-      "cl=tr.clips[c];" +
-      "out+='V' + (t+1) + ' ' + cl.name + ' [' + f(cl.start) + '..' + f(cl.end) + ']\\n';" +
-      "}}" +
-      "for(t=0;t<seq.audioTracks.length;t++){" +
-      "tr=seq.audioTracks[t];" +
-      "for(c=0;c<tr.clips.length;c++){" +
-      "cl=tr.clips[c];" +
-      "out+='A' + (t+1) + ' ' + cl.name + ' [' + f(cl.start) + '..' + f(cl.end) + ']\\n';" +
-      "}}" +
-      "return 'OK|' + out;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
-  },
-
-  // Маркер на активной секвенции.
-  add_marker: function (args, cb) {
-    var t = Number(args.time || 0);
-    var name = String(args.name || "AutoCut");
-    runScript(
-      "(function(){try{" +
-      "var seq=app.project.activeSequence;" +
-      "if(!seq){return 'ERR|нет активной секвенции';}" +
-      "seq.markers.addMarker(" + q(name) + ", " + t + ");" +
-      "return 'OK|маркер добавлен';" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
-  }
-};
-
-// --- обмен с сервером --------------------------------------------------
-
 function httpCall(method, path, body, cb) {
   if (NODE_HTTP && PORT) {
-    var data = body ? Buffer.from(body, "utf8") : null;
+    var data = body && BUF ? BUF.from(body, "utf8") : null;
     var headers = {};
     if (data) {
       headers["Content-Type"] = "text/plain;charset=utf-8";
@@ -336,7 +80,8 @@ function httpCall(method, path, body, cb) {
         var chunks = [];
         res.on("data", function (c) { chunks.push(c); });
         res.on("end", function () {
-          cb(null, Buffer.concat(chunks).toString("utf8"));
+          cb(null, BUF ? BUF.concat(chunks).toString("utf8") :
+                 String(chunks));
         });
       });
     req.on("error", function (e) { cb(e, ""); });
@@ -356,80 +101,19 @@ function httpCall(method, path, body, cb) {
     .catch(function (e) { cb(e, ""); });
 }
 
-function postResult(id, ok, data) {
-  httpCall("POST", "/result",
-           JSON.stringify({id: id, ok: ok, "данные": data}),
-           function (err) {
-             if (err) { log("не отправил результат: " + err, "err"); }
-           });
-}
-
-function handle(cmd) {
-  if (!cmd || !cmd.id) { return; }
-  var fn = COMMANDS[cmd.cmd];
-  if (!fn) {
-    postResult(cmd.id, false, "ERR|неизвестная команда " + cmd.cmd);
-    return;
-  }
-  log("команда: " + cmd.cmd, "dim");
-  fn(cmd.args || {}, function (res) {
-    var text = String(res === undefined || res === null ? "ERR|нет ответа" : res);
-    var ok = text.indexOf("OK|") === 0;
-    postResult(cmd.id, ok, text);
-    log(ok ? "готово" : "ошибка: " + text.slice(0, 120), ok ? "ok" : "err");
+function postJson(path, obj, cb) {
+  httpCall("POST", path, JSON.stringify(obj), function (err, text) {
+    if (err) { cb(err, null); return; }
+    try { cb(null, JSON.parse(text || "{}")); }
+    catch (e) { cb(null, {}); }
   });
 }
 
-// Порт ищем по очереди: 8931 может быть занят. По очереди, а не все
-// сразу: если опрашивать все разом, замыкания в обработчиках делят
-// одну переменную, и панель решит, что отвечает не тот сервер.
-var PORT_INDEX = 0;
-
-function findPort(done) {
-  if (PORT) { done(true); return; }
-  if (PORT_INDEX >= PORTS.length) {
-    // Порты кончились — начинаем сначала. Иначе панель, поднявшаяся
-    // раньше сервера, выжигает список и больше не пробует никогда.
-    PORT_INDEX = 0;
-    done(false);
-    return;
-  }
-  var port = PORTS[PORT_INDEX++];
-  if (NODE_HTTP) {
-    var req = NODE_HTTP.request({host: "127.0.0.1", port: port,
-                                 path: "/ping", method: "GET"},
-      function (res) {
-        res.resume();
-        res.on("end", function () { PORT = port; done(true); });
-      });
-    req.on("error", function () { done(false); });
-    req.end();
-    return;
-  }
-  fetch("http://127.0.0.1:" + port + "/ping")
-    .then(function (r) { return r.json(); })
-    .then(function () { PORT = port; done(true); })
-    .catch(function () { done(false); });
-}
-
-function poll() {
-  findPort(function (found) {
-    if (!found) {
-      setDot(false, "сервер AutoCut не отвечает");
-      setTimeout(poll, 400);
-      return;
-    }
-    httpCall("GET", "/next", null, function (err, text) {
-      if (err) {
-        setDot(false, "сервер AutoCut не отвечает");
-      } else {
-        setDot(true, "на связи");
-        var cmd = {};
-        try { cmd = JSON.parse(text || "{}"); } catch (e) { cmd = {}; }
-        if (cmd && cmd.id) { handle(cmd); }
-      }
-      setTimeout(poll, POLL_MS);
-    });
+function getJson(path, cb) {
+  httpCall("GET", path, null, function (err, text) {
+    if (err) { cb(err, null); return; }
+    try { cb(null, JSON.parse(text || "{}")); }
+    catch (e) { cb(null, {}); }
   });
 }
 
@@ -440,24 +124,535 @@ function setDot(on, text) {
   if (s) { s.textContent = text; }
 }
 
+function findPort(done) {
+  if (PORT) { done(true); return; }
+  if (PORT_INDEX >= PORTS.length) {
+    // Порты кончились — начинаем сначала. Иначе панель, поднявшаяся
+    // раньше движка, выжигает список и больше не пробует никогда.
+    PORT_INDEX = 0;
+    done(false);
+    return;
+  }
+  var port = PORTS[PORT_INDEX++];
+  if (NODE_HTTP) {
+    var settled = false;
+    var timer = null;
+    function finish(ok) {
+      if (settled) { return; }
+      settled = true;
+      if (timer) { clearTimeout(timer); }
+      done(ok);
+    }
+    var req = NODE_HTTP.request({host: "127.0.0.1", port: port,
+                                 path: "/ping", method: "GET"},
+      function (res) {
+        res.resume();
+        res.on("end", function () { PORT = port; finish(true); });
+      });
+    req.on("error", function () { finish(false); });
+    // Без таймаута запрос к занятому, но зависшему порту не завершается
+    // никогда: панель навсегда остаётся на «проверяю движок…» и даже
+    // не пытается запустить свой. req.setTimeout здесь недостаточно:
+    // он взводится только когда сокет уже подключился.
+    timer = setTimeout(function () {
+      try { req.destroy(); } catch (e) { }
+      finish(false);
+    }, 1200);
+    req.end();
+    return;
+  }
+  fetch("http://127.0.0.1:" + port + "/ping")
+    .then(function (r) { return r.json(); })
+    .then(function () { PORT = port; done(true); })
+    .catch(function () { done(false); });
+}
+
+// --- ExtendScript в Premiere --------------------------------------------
+//
+// Две особенности Premiere 26, обе проверены на живой панели:
+//
+// 1) __adobe_cep__.evalScript с колбэком НЕ работает: панель намертво
+//    зависает, и опросы сервера прекращаются. Синхронный вызов
+//    (без колбэка) скрипт выполняет, но результат НЕ возвращает —
+//    приходит всегда undefined.
+// 2) Поэтому результат идёт через файл: скрипт пишет его на диск,
+//    панель читает файл через Node.
+//
+// Отсюда правило: скрипт ВСЕГДА заканчивается записью в RESULT_FILE.
+
+var NODE_FS = nodeRequire("fs");
+var NODE_OS = nodeRequire("os");
+var NODE_PATH = nodeRequire("path");
+var NODE_CHILD = nodeRequire("child_process");
+
+var RESULT_FILE = "";
+try {
+  RESULT_FILE = (NODE_OS ? NODE_OS.tmpdir() : ".") + "/autocut_result.txt";
+} catch (e) { RESULT_FILE = "autocut_result.txt"; }
+
+// Аварийный журнал панели. Если HTML отрисовался, но скрипт упал,
+// в обычном логе CEP не будет ни строки — пишем ошибки сами.
+var PANEL_LOG = "";
+try {
+  PANEL_LOG = (NODE_OS ? NODE_OS.tmpdir() : ".") + "/autocut_panel.log";
+} catch (e) { PANEL_LOG = "autocut_panel.log"; }
+
+function fileLog(text) {
+  if (!NODE_FS) { return; }
+  try {
+    NODE_FS.appendFileSync(PANEL_LOG,
+      new Date().toISOString() + " " + String(text) + "\n");
+  } catch (e) { }
+}
+
+window.onerror = function (msg, src, line, col, err) {
+  fileLog("ERROR " + msg + " at " + src + ":" + line + ":" + col +
+          (err && err.stack ? "\n" + err.stack : ""));
+};
+
+window.addEventListener("load", function () {
+  fileLog("panel loaded");
+});
+
+// Путь к движку записывает установщик панели. В исходниках панель
+// лежит рядом с run_mcp.py, поэтому для разработки есть запасной путь.
+var ENGINE_FILE = "";
+var ENGINE_PYTHON_FILE = "";
+var ENGINE_ENV_FILE = "";
+try {
+  if (NODE_PATH) {
+    var panelDir = "";
+    if (typeof __dirname !== "undefined") {
+      panelDir = __dirname;
+    } else if (window.location && window.location.pathname) {
+      panelDir = decodeURIComponent(window.location.pathname)
+        .replace(/^\/([A-Za-z]:)/, "$1");
+      panelDir = NODE_PATH.dirname(panelDir);
+    }
+    if (panelDir) {
+      ENGINE_FILE = NODE_PATH.join(panelDir, "engine_path.txt");
+      ENGINE_PYTHON_FILE = NODE_PATH.join(panelDir, "engine_python.txt");
+      ENGINE_ENV_FILE = NODE_PATH.join(panelDir, "engine_env.txt");
+    }
+  }
+} catch (e) { ENGINE_FILE = ""; }
+
+var ENGINE_STARTED = false;
+
+function readEngineText(path) {
+  if (!NODE_FS || !path) { return ""; }
+  try { return String(NODE_FS.readFileSync(path, "utf8")).trim(); }
+  catch (e) { return ""; }
+}
+
+function engineDir() {
+  var dir = readEngineText(ENGINE_FILE);
+  if (!dir && NODE_PATH && typeof __dirname !== "undefined") {
+    var parent = NODE_PATH.resolve(__dirname, "..");
+    try {
+      if (NODE_FS && NODE_FS.existsSync(NODE_PATH.join(parent, "run_mcp.py"))) {
+        dir = parent;
+      }
+    } catch (e) { }
+  }
+  return dir;
+}
+
+// Портативный ffmpeg лежит в .tools рядом с движком. Ищем его сами:
+// установщик может не знать, куда именно распаковали архив.
+function localFfmpegDir(dir) {
+  if (!NODE_FS || !NODE_PATH) { return ""; }
+  var base = NODE_PATH.resolve(dir, "..", ".tools", "ffmpeg");
+  try {
+    var names = NODE_FS.readdirSync(base);
+    for (var i = 0; i < names.length; i++) {
+      var bin = NODE_PATH.join(base, names[i], "bin");
+      if (NODE_FS.existsSync(NODE_PATH.join(bin, "ffmpeg.exe"))) {
+        return bin;
+      }
+    }
+  } catch (e) { }
+  return "";
+}
+
+// Запуск движка из панели. Пользователь не должен открывать консоль:
+// панель поднимает run_mcp.py сама, если он ещё не слушает порт.
+function startEngine() {
+  if (ENGINE_STARTED || !NODE_CHILD || !NODE_FS || !NODE_PATH) { return; }
+  var dir = engineDir();
+  if (!dir) { return; }
+  var script = NODE_PATH.join(dir, "run_mcp.py");
+  try {
+    if (!NODE_FS.existsSync(script)) { return; }
+  } catch (e) { return; }
+
+  var logPath = NODE_PATH.join(dir, "autocut_engine.log");
+
+  // Окружение: панель может запускать портативный Python, которого нет
+  // в PATH. Установщик кладёт пути в engine_env.txt, а для разработки
+  // ищем ffmpeg в .tools сами.
+  var env = {};
+  try { for (var k in process.env) { env[k] = process.env[k]; } } catch (e) { }
+  var extra = readEngineText(ENGINE_ENV_FILE) || localFfmpegDir(dir);
+  if (extra) {
+    env.PATH = extra + ";" + (env.PATH || "");
+  }
+  env.PYTHONIOENCODING = "utf-8";
+  env.PYTHONUTF8 = "1";
+
+  var names = [];
+  var configured = readEngineText(ENGINE_PYTHON_FILE);
+  if (configured) { names.push(configured); }
+  try {
+    var localPython = NODE_PATH.resolve(dir, "..", ".tools",
+                                        "python311", "python.exe");
+    if (NODE_FS.existsSync(localPython)) { names.push(localPython); }
+  } catch (e) { }
+  names.push("python");
+  names.push("py");
+
+  var idx = 0;
+  function attempt() {
+    if (idx >= names.length) {
+      log("движок не запустился: python не найден", "err");
+      return;
+    }
+    var exe = names[idx++];
+    var probe = null;
+    try {
+      probe = NODE_CHILD.spawnSync(exe, ["--version"],
+                                   {windowsHide: true, env: env});
+    } catch (e) { probe = null; }
+    if (!probe || probe.error || probe.status !== 0) { attempt(); return; }
+    var out = "ignore";
+    try { out = NODE_FS.openSync(logPath, "a"); } catch (e) { out = "ignore"; }
+    try {
+      var child = NODE_CHILD.spawn(exe, [script, "--bridge-only"], {
+        cwd: dir,
+        detached: true,
+        windowsHide: true,
+        env: env,
+        stdio: ["ignore", out, out]
+      });
+      child.on("error", function () {
+        ENGINE_STARTED = false;
+        attempt();
+      });
+      child.unref();
+      ENGINE_STARTED = true;
+      log("движок AutoCut запускается: " + exe, "dim");
+    } catch (e) { attempt(); }
+    try { if (out !== "ignore") { NODE_FS.closeSync(out); } } catch (e) { }
+  }
+  attempt();
+}
+
+function evalScript(script) {
+  try {
+    if (window.__adobe_cep__ && window.__adobe_cep__.evalScript) {
+      return window.__adobe_cep__.evalScript(script);
+    }
+  } catch (e) {
+    return "ERR|" + e;
+  }
+  return "ERR|панель не в Premiere";
+}
+
+function readResult() {
+  if (!NODE_FS) { return ""; }
+  try {
+    return NODE_FS.readFileSync(RESULT_FILE, "utf8");
+  } catch (e) {
+    return "";
+  }
+}
+
+// Выполнить скрипт и отдать его результат.
+function runScript(script, cb) {
+  try { if (NODE_FS) { NODE_FS.unlinkSync(RESULT_FILE); } } catch (e) { }
+  var wrapped =
+    "(function(){" +
+    "var __r='';" +
+    "try{ __r=" + script + "; }catch(e){ __r='ERR|'+e.toString(); }" +
+    "try{ var f=new File(" + q(RESULT_FILE) + ");" +
+    "if(f.open('w')){ f.write(String(__r)); f.close(); } }catch(e){}" +
+    "return __r;})()";
+  evalScript(wrapped);
+  // Файл пишется сразу, но дать ему долю секунды.
+  var tries = 0;
+  (function wait() {
+    var res = readResult();
+    if (res) { cb(res); return; }
+    if (tries++ > 40) { cb("ERR|не дождались результата"); return; }
+    setTimeout(wait, 50);
+  })();
+}
+
+function winPath(p) {
+  return String(p).replace(/\\/g, "/");
+}
+
+function q(s) {
+  return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+// Импорт готовой рыбы в проект и открытие секвенции.
+function importXml(path, cb) {
+  var script =
+    "(function(){try{" +
+    "var f=new File(" + q(winPath(path)) + ");" +
+    "if(!f.exists){return 'ERR|нет файла ' + f.fsName;}" +
+    "app.project.importXML(f);" +
+    "return 'OK|XML импортирован: ' + f.name;" +
+    "}catch(e){return 'ERR|' + e.toString();}})()";
+  runScript(script, function (res) {
+    log("импорт: " + res, String(res).indexOf("OK|") === 0 ? "ok" : "err");
+    showSequences();
+    if (cb) { cb(res); }
+  });
+}
+
+// --- команды ------------------------------------------------------------
+//
+// Команды приходят с сервера. Каждая получает аргументы и колбэк:
+// запуск ExtendScript асинхронный по сути (результат приходит из файла),
+// и ответ уходит сразу после него.
+
+var COMMANDS = {
+  // Диагностика: чем именно мы говорим с Premiere.
+  diag: function (args, cb) {
+    var info = "node=" + (NODE_HTTP ? "да" : "нет") +
+               " native=" + (window.__adobe_cep__ && window.__adobe_cep__.evalScript
+                             ? "да" : "нет") +
+               " порт=" + (PORT || "-") +
+               " файл=" + RESULT_FILE;
+    runScript("'версия ' + app.version", function (res) {
+      cb(info + " | ExtendScript: " + res);
+    });
+  },
+
+  // Импорт готовой рыбы в проект: XML ложится в проект и создаёт
+  // секвенцию, человек ничего не кликает.
+  import_xml: function (args, cb) {
+    var p = winPath(args.path || "");
+    if (!p) { cb("ERR|не указан путь"); return; }
+    runScript(
+      "(function(){try{" +
+      "var f=new File(" + q(p) + ");" +
+      "if(!f.exists){return 'ERR|нет файла ' + f.fsName;}" +
+      "app.project.importXML(f);" +
+      "return 'OK|XML импортирован: ' + f.name;" +
+      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
+  },
+
+  // Что в проекте: секвенции, дорожки, клипы.
+  project_info: function (args, cb) {
+    runScript(
+      "(function(){try{" +
+      "var out='', i, t, c, tr, cl, s;" +
+      "var f=function(v){ if(typeof v==='number'){return v.toFixed(2);} " +
+      "if(v&&typeof v.seconds==='number'){return v.seconds.toFixed(2);} " +
+      "return String(v); };" +
+      "for(i=0;i<app.project.sequences.length;i++){" +
+      "s=app.project.sequences[i];" +
+      "out+='СЕКВЕНЦИЯ ' + s.name + '\\n';" +
+      "for(t=0;t<s.videoTracks.length;t++){" +
+      "tr=s.videoTracks[t];" +
+      "for(c=0;c<tr.clips.length;c++){" +
+      "cl=tr.clips[c];" +
+      "out+='  V' + (t+1) + ' ' + cl.name + ' [' + f(cl.start) + '..' + f(cl.end) + ']\\n';" +
+      "}}" +
+      "for(t=0;t<s.audioTracks.length;t++){" +
+      "tr=s.audioTracks[t];" +
+      "for(c=0;c<tr.clips.length;c++){" +
+      "cl=tr.clips[c];" +
+      "out+='  A' + (t+1) + ' ' + cl.name + ' [' + f(cl.start) + '..' + f(cl.end) + ']\\n';" +
+      "}}" +
+      "}" +
+      "return 'OK|' + out;" +
+      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
+  }
+};
+
+// --- действия ------------------------------------------------------------
+
+function findMaterial() {
+  var folder = document.getElementById("folder").value.trim();
+  if (!folder) { log("укажите папку с материалом", "err"); return; }
+  log("ищу материал в " + folder, "dim");
+  postJson("/action", {action: "material", args: {folder: folder}},
+           function (err, res) {
+             if (err || !res) { log("движок не отвечает", "err"); return; }
+             if (!res.ok) { log(res.error || "не нашлось", "err"); return; }
+             var parts = res.части || {};
+             var out = [];
+             for (var k in parts) {
+               out.push(k + ": " + parts[k].файлов + " шт, " +
+                        parts[k].секунд + " с");
+             }
+             document.getElementById("parts").textContent = out.join("   |   ");
+             log("найдено: " + out.join("  |  "), "ok");
+           });
+}
+
+function buildDigest() {
+  var folder = document.getElementById("folder").value.trim();
+  if (!folder) { log("укажите папку с материалом", "err"); return; }
+  var target = document.getElementById("target").value.trim();
+  var out = folder.replace(/[\\/]+$/, "") + "/autocut_out";
+  log("собираю дайджест, это минуты", "dim");
+  postJson("/action", {
+    action: "digest",
+    args: {folder: folder, out: out, target_sec: target ? Number(target) : null}
+  }, function (err, res) {
+    if (err || !res || !res.ok) {
+      log("движок не взял задачу: " + (res && res.error ? res.error : "?"), "err");
+      return;
+    }
+    TASK = res.задача;
+    log("задача " + TASK + ", слежу", "dim");
+    watchTask();
+  });
+}
+
+function cancelTask() {
+  if (!TASK) { log("нет активной задачи", "dim"); return; }
+  setDot(false, "отменяю…");
+  postJson("/action", {action: "cancel", args: {task_id: TASK}},
+           function (err, res) {
+             if (err || !res || !res.ok) {
+               log("не удалось отменить: " +
+                   (res && res.error ? res.error : "?"), "err");
+               return;
+             }
+             log("отмена запрошена", "dim");
+             watchTask();
+           });
+}
+
+function runDoctor() {
+  log("проверяю движок…", "dim");
+  postJson("/action", {action: "doctor", args: {}}, function (err, res) {
+    if (err || !res) { log("движок не отвечает", "err"); return; }
+    if (res.ok) {
+      log("движок готов: Python " + (res.python || "?") + ", ffmpeg есть", "ok");
+    } else {
+      log("не хватает: " + ((res.ошибки || []).join("; ") || "?"), "err");
+    }
+    var mods = res.модули || {};
+    var missing = [];
+    for (var k in mods) { if (!mods[k]) { missing.push(k); } }
+    if (missing.length) { log("нет модулей: " + missing.join(", "), "err"); }
+    if (res.свободно_гб) {
+      log("свободно на диске: " + res.свободно_гб + " ГБ", "dim");
+    }
+  });
+}
+
+function watchTask() {
+  if (TIMER) { clearTimeout(TIMER); }
+  if (!TASK) { return; }
+  getJson("/task?id=" + TASK, function (err, t) {
+    if (err || !t) { TIMER = setTimeout(watchTask, 1500); return; }
+    var st = t.состояние || "";
+    if (st === "идёт" || st === "в очереди") {
+      var steps = t.результаты || [];
+      var step = steps.length ? (steps[steps.length - 1].шаг || "") : "";
+      var msg = "собираю… " + Math.round(t.секунд || 0) + " с";
+      if (step) { msg += " · " + step; }
+      setDot(true, msg);
+      TIMER = setTimeout(watchTask, 2000);
+      return;
+    }
+    if (st === "готово") {
+      TASK = "";
+      setDot(true, "готово, импортирую в проект");
+      var xml = (t.результат && t.результат.xml) || "";
+      if (!xml) { log("XML не указан", "err"); return; }
+      importXml(xml, function (res) {
+        setDot(String(res).indexOf("OK|") === 0, String(res).indexOf("OK|") === 0
+          ? "готово" : "ошибка импорта");
+      });
+      return;
+    }
+    if (st === "отменено") {
+      TASK = "";
+      setDot(false, "отменено");
+      log("задача отменена", "dim");
+      return;
+    }
+    TASK = "";
+    setDot(false, "ошибка");
+    log("задача провалилась: " + (t.ошибка || "?"), "err");
+    (t.журнал || []).slice(-20).forEach(function (l) { log("  " + l, "dim"); });
+  });
+}
+
+function showSequences() {
+  var script =
+    "(function(){try{" +
+    "var out='', i, t, c, tr, cl, s;" +
+    "var f=function(v){ if(typeof v==='number'){return v.toFixed(2);} " +
+    "if(v&&typeof v.seconds==='number'){return v.seconds.toFixed(2);} " +
+    "return String(v); };" +
+    "for(i=0;i<app.project.sequences.length;i++){" +
+    "s=app.project.sequences[i];" +
+    "out+='СЕКВЕНЦИЯ ' + s.name + '\\n';" +
+    "for(t=0;t<s.videoTracks.length;t++){" +
+    "tr=s.videoTracks[t];" +
+    "for(c=0;c<tr.clips.length;c++){" +
+    "cl=tr.clips[c];" +
+    "out+='  V' + (t+1) + ' ' + cl.name + ' [' + f(cl.start) + '..' + f(cl.end) + ']\\n';" +
+    "}}" +
+    "}" +
+    "return 'OK|' + out;" +
+    "}catch(e){return 'ERR|' + e.toString();}})()";
+  runScript(script, function (res) {
+  if (String(res).indexOf("OK|") !== 0) { log("проект: " + res, "err"); return; }
+  var text = String(res).slice(3);
+  document.getElementById("parts").textContent = text.split("\n")[0] || "";
+  text.split("\n").slice(0, 24).forEach(function (l) { log(l, "dim"); });
+  });
+}
+
 function checkProject() {
-  runScript("app.project.name", function (res) {
-    log(res, String(res).indexOf("OK|") === 0 ? "ok" : "err");
+  showSequences();
+}
+
+// --- запуск --------------------------------------------------------------
+
+function poll() {
+  findPort(function (found) {
+    if (!found) {
+      setDot(false, "движок AutoCut не отвечает");
+      startEngine();
+      setTimeout(poll, 1000);
+      return;
+    }
+    setDot(true, "движок на связи");
+    if (TASK) { watchTask(); }
   });
 }
 
 window.addEventListener("load", function () {
-  var b1 = document.getElementById("btn-check");
-  var b2 = document.getElementById("btn-refresh");
-  if (b1) { b1.addEventListener("click", checkProject); }
-  if (b2) {
-    b2.addEventListener("click", function () {
+  var bFind = document.getElementById("btn-find");
+  var bBuild = document.getElementById("btn-digest");
+  var bCheck = document.getElementById("btn-check");
+  var bCancel = document.getElementById("btn-cancel");
+  var bDoctor = document.getElementById("btn-doctor");
+  var bRefresh = document.getElementById("btn-refresh");
+  if (bFind) { bFind.addEventListener("click", findMaterial); }
+  if (bBuild) { bBuild.addEventListener("click", buildDigest); }
+  if (bCheck) { bCheck.addEventListener("click", checkProject); }
+  if (bCancel) { bCancel.addEventListener("click", cancelTask); }
+  if (bDoctor) { bDoctor.addEventListener("click", runDoctor); }
+  if (bRefresh) {
+    bRefresh.addEventListener("click", function () {
       PORT = 0;
-      PORT_INDEX = 0;
       PORTS = [8931, 8932, 8933];
       poll();
     });
   }
-  log("панель поднялась, жду сервер…", "dim");
+  log("панель AutoCut поднялась", "dim");
   poll();
 });

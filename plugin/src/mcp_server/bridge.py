@@ -26,12 +26,41 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 DEFAULT_PORT = 8931
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 # Панель перебирает порты по очереди, и сервер должен выбирать так же,
 # иначе они разойдутся: сервер встанет на 8932, а панель пойдёт по
 # 8931 и упрётся в чужой сервер.
 PORTS = (8931, 8932, 8933)
+MAX_BODY = 1_000_000      # больше в панель и в мост не приходит
+
+
+def origin_allowed(origin: str) -> bool:
+    """Пускать только панель и локальные страницы.
+
+    Это не полноценная авторизация (локальный процесс может подделать
+    заголовок), но защита от CSRF: обычная веб-страница в браузере
+    не сможет дёрнуть /action или /command. Панель CEP приходит либо
+    без Origin, либо с file:// (локальный файл) или null.
+    """
+    origin = (origin or "").strip()
+    if not origin:
+        return True
+    if origin == "null":
+        return True
+    try:
+        parsed = urlparse(origin)
+    except Exception:
+        return False
+    # Панель CEP грузится из локального файла: file:// или
+    # file:///C:/... (хост пустой) либо file://localhost/... .
+    # file://evil.com — уже не локальный файл, его не пускаем.
+    if parsed.scheme == "file":
+        return (parsed.hostname or "").lower() in ("", "localhost")
+    return (parsed.scheme in ("http", "https")
+            and (parsed.hostname or "").lower() in LOCAL_HOSTS)
 
 
 class Bridge:
@@ -109,10 +138,18 @@ BRIDGE = Bridge()
 
 
 class Handler(BaseHTTPRequestHandler):
-    """Только три маршрута: /next, /result, /ping."""
+    """Маршруты: /next, /ping, /result, /task, /action, /log, /command."""
 
     def log_message(self, fmt, *args):
         pass                      # в stdout писать нельзя: это протокол
+
+    def _origin_ok(self) -> bool:
+        origin = self.headers.get("Origin") or ""
+        if origin_allowed(origin):
+            return True
+        self._send(403, {"ok": False,
+                         "error": "запрос не с локального клиента"})
+        return False
 
     def _send(self, code: int, payload: dict):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -123,7 +160,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _body(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0:
+            return b""
+        if n > MAX_BODY:
+            self._send(413, {"ok": False, "error": "слишком большой запрос"})
+            return None
+        return self.rfile.read(n)
+
     def do_GET(self):
+        if not self._origin_ok():
+            return
         if self.path.startswith("/next"):
             with BRIDGE._lock:
                 BRIDGE.polls += 1
@@ -143,14 +194,27 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/result"):
             self._get_result(self.path)
             return
+        if self.path.startswith("/task"):
+            cid = self.path.split("id=", 1)[1].split("&")[0] if "id=" in self.path else ""
+            try:
+                from mcp_server import actions
+                task = actions.get(cid)
+                res = task.info() if task else {"error": "нет задачи " + cid}
+            except Exception as e:
+                res = {"error": str(e)}
+            self._send(200, res)
+            return
         self._send(404, {"error": "нет такого маршрута"})
 
     def do_POST(self):
+        if not self._origin_ok():
+            return
         if self.path.startswith("/result"):
-            n = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(n).decode("utf-8", "replace")
+            raw = self._body()
+            if raw is None:
+                return
             try:
-                data = json.loads(raw)
+                data = json.loads(raw.decode("utf-8", "replace"))
             except Exception:
                 data = {"ok": False, "данные": "не разобрал ответ"}
             BRIDGE.finish(data.get("id", ""), data.get("ok", False),
@@ -158,19 +222,53 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True})
             return
         if self.path.startswith("/log"):
-            n = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(n).decode("utf-8", "replace")
-            BRIDGE.add_log(raw)
+            raw = self._body()
+            if raw is None:
+                return
+            BRIDGE.add_log(raw.decode("utf-8", "replace"))
             self._send(200, {"ok": True})
+            return
+        if self.path.startswith("/action"):
+            # Действие AutoCut для панели: собрать дайджест и т.п.
+            raw = self._body()
+            if raw is None:
+                return
+            try:
+                data = json.loads(raw.decode("utf-8", "replace"))
+            except Exception:
+                data = {}
+            name = data.get("action") or data.get("действие") or ""
+            args = data.get("args") or data.get("аргументы") or {}
+            try:
+                from mcp_server import actions
+                if name == "digest":
+                    res = actions.digest(**args)
+                elif name == "interview":
+                    res = actions.interview(**args)
+                elif name == "material":
+                    res = actions.material(**args)
+                elif name == "cancel":
+                    task_id = args.get("task_id") or args.get("id") or ""
+                    res = {"ok": actions.cancel(task_id)}
+                elif name == "doctor":
+                    res = actions.doctor()
+                elif name == "tasks":
+                    res = {"ok": True, "задачи": actions.list_tasks()}
+                else:
+                    res = {"ok": False, "error": "неизвестное действие: " + name}
+            except Exception as e:
+                res = {"ok": False, "error": str(e)}
+            self._send(200, res)
             return
         if self.path.startswith("/command"):
             # Поставить команду в очередь извне. Нужно, чтобы до сервера
             # можно было дотянуться не только по MCP: очередь живёт в
             # памяти процесса, и из другого процесса до неё не дойти.
-            n = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(n).decode("utf-8", "replace")
+            raw = self._body()
+            if raw is None:
+                return
             try:
-                data = json.loads(raw)
+                data = json.loads(raw.decode("utf-8", "replace"))
             except Exception:
                 data = {}
             cmd = data.get("cmd") or data.get("команда") or ""
@@ -194,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, res if res is not None else {})
 
     def do_OPTIONS(self):
+        if not self._origin_ok():
+            return
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

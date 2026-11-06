@@ -43,6 +43,18 @@ def install_panel() -> dict:
             shutil.rmtree(dst, ignore_errors=True)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(PANEL_SRC, dst)
+        # Панель живёт в %APPDATA%, а движок остаётся в папке проекта.
+        # Абсолютный путь к plugin/ пишем рядом с панелью: иначе после
+        # установки панель не знает, откуда запускать run_mcp.py.
+        (dst / "engine_path.txt").write_text(str(SRC.parent), encoding="utf-8")
+        # Python мог быть поставлен портативно и не попасть в PATH.
+        # Панель запустит именно тот интерпретатор, из которого ставили
+        # зависимости, а ffmpeg найдёт по записанному PATH.
+        (dst / "engine_python.txt").write_text(sys.executable, encoding="utf-8")
+        ffmpeg = shutil.which("ffmpeg")
+        env_dirs = [str(Path(ffmpeg).parent)] if ffmpeg else []
+        (dst / "engine_env.txt").write_text(
+            os.pathsep.join(env_dirs), encoding="utf-8")
         out["установлено"] = True
     except Exception as e:
         out["ошибки"].append("копирование: " + str(e))
@@ -69,4 +81,5 @@ def install_panel() -> dict:
 
 
 def is_installed() -> bool:
-    return (panel_target() / "manifest.xml").is_file()
+    # Манифест CEP лежит в CSXS/manifest.xml; в корне панели его нет.
+    return (panel_target() / "CSXS" / "manifest.xml").is_file()
