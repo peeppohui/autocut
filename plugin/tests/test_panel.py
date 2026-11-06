@@ -15,10 +15,8 @@ JS = (PANEL / "panel.js").read_text(encoding="utf-8")
 HTML = (PANEL / "index.html").read_text(encoding="utf-8")
 INSTALL = (ROOT / "src" / "mcp_server" / "premiere_install.py").read_text(
     encoding="utf-8")
-BRIDGE = (ROOT / "src" / "mcp_server" / "bridge.py").read_text(
-    encoding="utf-8")
-ACTIONS = (ROOT / "src" / "mcp_server" / "actions.py").read_text(
-    encoding="utf-8")
+BRIDGE = (ROOT / "engine" / "api.py").read_text(encoding="utf-8")
+ACTIONS = (ROOT / "engine" / "actions.py").read_text(encoding="utf-8")
 RUN_MCP = (ROOT / "run_mcp.py").read_text(encoding="utf-8")
 SERVER = (ROOT / "src" / "mcp_server" / "server.py").read_text(
     encoding="utf-8")
