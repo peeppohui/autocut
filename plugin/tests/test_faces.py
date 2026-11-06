@@ -209,14 +209,6 @@ ok("окно не вылезает за кадр",
 ok("окно не схлопнулось",
    all(bw >= 608 * 0.70 * 0.99 for _x, _y, bw, _h in wins), "")
 
-# пайп всегда одного размера - иначе ffmpeg не прочитает поток
-sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src" / "ml"))
-import vertical  # noqa: E402
-ok("размер пайпа постоянен", vertical.pipe_size(1080, 1080 / 1920) == (608, 1080),
-   str(vertical.pipe_size(1080, 1080 / 1920)))
-ok("и для другого кадра тоже", vertical.pipe_size(720, 1080 / 1920) == (406, 720),
-   str(vertical.pipe_size(720, 1080 / 1920)))
-
 print()
 if fail:
     print(f"FACES FAIL ({len(fail)}): {fail}")

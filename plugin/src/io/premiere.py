@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 AutoCut Premiere — выгрузка готового таймлайна в Adobe Premiere Pro.
-Читает CSV таймлайна (после autocut --auto) и строит:
+Читает CSV таймлайна (из digest.py или interview.py) и строит:
   1) FCP7 XML (xmeml v5) — File > Import в Premiere, звук сохраняется;
   2) EDL CMX3600 — запасной вариант (File > Import).
 
@@ -69,10 +69,10 @@ def check_timebase() -> None:
             f"или project.drop_frame в config/settings.json")
 
 media_dir_global = Path(".")
-try:
-    from autocut import REC_DURATION
-except ImportError:
-    REC_DURATION = {}
+# Рекомендованные длительности планов больше не живут в старом autocut.py:
+# он удалён в v2. Значения остаются в настройках, иначе --trim-rec молча
+# перестал бы ограничивать куски.
+REC_DURATION = settings.get("digest.rec_duration_sec", {}) or {}
 
 
 def load_timeline(path: Path) -> List[Dict]:
@@ -840,38 +840,10 @@ def main(argv=None) -> int:
         for c in missing[:5]:
             print(f"  нет: {c['abspath']}")
 
-    # Плашки: считаем их до сборки, потому что нужны длительности в
-    # секундах, а build_fcp7 оперирует кадрами и перетирает их своими.
-    _lt = _who = None
-    if bool(settings.get("lower_thirds.enabled", True)):
-        try:
-            import plashki as _lt
-            _who = {k: v for k, v in _lt.people().items() if v.get("fio")}
-        except Exception:
-            _who = {}
-        if not _who:
-            print("Плашки не намечены: не заполнено ФИО "
-                  "(lower_thirds.people в настройках).")
-
     root = build_fcp7(clips, fps=args.fps, width=args.width, height=args.height,
                       seq_name=args.name, trim_rec=args.trim_rec, audios=audios,
                       markers=not args.no_markers,
                       stacked=args.stacked)
-    # Плашки считаются ПОСЛЕ сборки: только теперь известны настоящие
-    # длительности в секвенции. Считать раньше нельзя — при --trim-rec
-    # куски укорачиваются, и таймкод плашки уехал бы от её места.
-    if _who:
-        ents, notes = _lt.plan(clips, _who,
-                               float(settings.get("lower_thirds.min_sec", 5.0)),
-                               args.fps)
-        tpl = str(settings.get("lower_thirds.template", "SVS_low_third"))
-        for e in ents:
-            e["template"] = tpl
-        lower_marks = add_lower_markers(root, ents, args.fps)
-        if ents:
-            print(f"Плашек {len(ents)}: маркеры в секвенции, шаблон {tpl}.")
-        for n in notes:
-            print(f"  Пропущено: {n}")
 
     problems = check_xml(root)
     if problems:

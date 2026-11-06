@@ -11,7 +11,6 @@ sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "src"))
 import bootstrap  # noqa: F401,F403
 
 import settings
-import autocut
 import detect
 
 # Значения, которые уже читаются из settings.json прямо в коде.
@@ -29,16 +28,15 @@ def check(name, actual, expected):
     print(f"FAIL {name}: код={actual!r} settings={expected!r}")
 
 
-# --- autocut: рекомендуемые длительности планов ---
+# --- рекомендуемые длительности планов ---
 from settings import get
 
+# Старый autocut.py удалён в v2; длительности теперь читает premiere.py
+# прямо из settings. Проверяем, что настройка на месте и не распалась.
 rec = get("digest.rec_duration_sec")
-check("digest.rec_duration_sec[общий]", autocut.REC_DURATION["общий"], rec["общий"])
-check("digest.rec_duration_sec[деталь]", autocut.REC_DURATION["деталь"], rec["деталь"])
-check("digest.rec_duration_sec[крупный]", autocut.REC_DURATION["крупный"], rec["крупный"])
-check("digest.rec_duration_sec[средний1]", autocut.REC_DURATION["средний1"], rec["средний1"])
-check("digest.rec_duration_sec[средний2]", autocut.REC_DURATION["средний2"], rec["средний2"])
-check("digest.rec_duration_sec[дальний]", autocut.REC_DURATION["дальний"], rec["дальний"])
+for _plan in ("деталь", "крупный", "средний1", "средний2", "общий", "дальний"):
+    _v = rec.get(_plan) if isinstance(rec, dict) else None
+    check(f"digest.rec_duration_sec[{_plan}]", isinstance(_v, (list, tuple)) and len(_v) == 2, True)
 
 # --- detect: пороги эвристики крупности ---
 check("detect.face_w_detail", detect.FACE_W_DETAIL, get("detect.face_w_detail"))
@@ -76,11 +74,6 @@ DETECT_CASES = [
 for name, box, kpts, kconf, people, want_plan, want_conf in DETECT_CASES:
     v = detect.classify_by_pose(1920, 1080, box, kpts, kconf, people)
     check(f"detect эталон «{name}»", (v.plan, v.conf), (want_plan, want_conf))
-
-# --- autocut: эталон раскладки демо-набора ---
-demo_order = [c.plan for c in autocut.suggest_order(autocut.demo_clips("digest"), mode="digest")]
-rep = autocut.validate_sequence(autocut.suggest_order(autocut.demo_clips("digest"), mode="digest"))
-check("autocut эталон оценки демо-дайджеста", (rep["total"], rep["grade"]), (92.5, "ОТЛИЧНО"))
 
 # --- структура: ключи, на которые ссылается код, существуют ---
 for dotted in ("project.fps", "project.drop_frame", "export.fps",
