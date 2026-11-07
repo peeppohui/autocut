@@ -432,6 +432,21 @@ src2, hint2 = SO.find_materials(tmp_flat)
 ok("материал прямо в корне берётся как есть",
    src2 == tmp_flat and hint2 is None, "{} {}".format(src2, hint2))
 
+# материал на два уровня глубже, а в корне лежит готовый ролик:
+# готовый MP4 — тоже видео, но это не исходник. Части важнее.
+tmp_deep = _P(tempfile.mkdtemp())
+(tmp_deep / "материал" / "исх" / names["standup"]).mkdir(parents=True)
+(tmp_deep / "материал" / "исх" / names["broll"]).mkdir()
+(tmp_deep / "материал" / "исх" / names["interview"]).mkdir()
+(tmp_deep / "дайджест.mp4").write_bytes(b"\0")
+src3, hint3 = SO.find_materials(tmp_deep)
+ok("готовый ролик в корне не мешает найти части",
+   src3 is not None and src3.name == "исх", "{} {}".format(src3, hint3))
+rp3 = DG.resolve_parts(tmp_deep)
+ok("части найдены на два уровня глубже",
+   all(rp3[k] is not None for k in ("standup", "broll", "interview")),
+   str(rp3))
+
 # --- путь в плане считается от папки, которую видит Premiere ---
 # Окно отдаёт Premiere корень проекта как media-dir. Путь считался от
 # папки с частями, и получалось «стендап/файл.mp4», а файл лежит в

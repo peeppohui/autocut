@@ -84,6 +84,55 @@ def find_input(root: Path):
     return root, False
 
 
+PART_KEYS = ("standup", "broll", "interview")
+PREFERRED_DIRS = ("исх", "исходники", "видео", "video", "clips", "footage")
+
+
+def parts_in(folder: Path, names: dict = None) -> dict:
+    """Какие папки частей есть прямо в этой папке."""
+    names = names or part_names()
+    return {k: folder / names[k] for k in PART_KEYS
+            if (folder / names[k]).is_dir()}
+
+
+def find_parts_base(root: Path, max_depth: int = 3):
+    """Папка, где лежат части, даже если она вложена на два уровня.
+
+    Папка проекта часто выглядит так: готовый ролик и `.prproj` в корне,
+    а исходники — в `материал/исх/стендап`. Готовый MP4 тоже видео, и
+    раньше он принимался за материал: части не находились, сборка падала.
+    Поэтому сначала ищем именно папки частей, и только потом — любое видео.
+
+    Возвращает самую близкую к корню папку, где частей больше; при
+    равенстве предпочитает известные имена (`исх`, `видео`).
+    """
+    if not root or not root.is_dir():
+        return None
+    level = [root]
+    for _depth in range(max_depth + 1):
+        found = []
+        for base in level:
+            got = parts_in(base)
+            if len(got) >= 2:
+                found.append((base, got))
+        if found:
+            found.sort(key=lambda pair: (-len(pair[1]), pair[0].name.lower()))
+            for name in PREFERRED_DIRS:
+                for base, _got in found:
+                    if base.name.lower() == name:
+                        return base
+            return found[0][0]
+        nxt = []
+        for base in level:
+            try:
+                nxt.extend(p for p in base.iterdir()
+                           if p.is_dir() and not p.is_symlink())
+            except OSError:
+                continue
+        level = sorted(nxt, key=lambda p: p.name)
+    return None
+
+
 def has_material(folder: Path) -> bool:
     """Есть ли в папке то, что сортировать.
 
@@ -112,9 +161,16 @@ def find_materials(root: Path):
     вложенную. Если кандидатов несколько и ни один не известный, это
     неоднозначность: говорим, какие варианты, и не гадаем.
     """
+    # Сперва — папка с частями: готовый ролик в корне не должен
+    # считаться материалом. Части могут быть на два уровня глубже.
+    base = find_parts_base(root)
+    if base is not None:
+        if base == root:
+            return root, None
+        return base, "материал в подпапке «{}»".format(base.name)
     if has_material(root):
         return root, None
-    preferred = ("исх", "исходники", "видео", "video", "clips", "footage")
+    preferred = PREFERRED_DIRS
     subs = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
     for name in preferred:
         for p in subs:

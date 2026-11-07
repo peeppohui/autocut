@@ -62,23 +62,16 @@ def resolve_parts(root: Path):
     """Папки трёх частей.
 
     Человек указывает папку проекта, а материалы часто лежат во вложенной
-    (`исх`). Сначала ищем части прямо в корне, если их нет — пробуем
-    один уровень вглубь по тому же правилу, что и сортировщик. Иначе
-    блок падал бы с «нет папок частей» при материале, который рядом.
+    (`материал/исх`). Ищем части в корне и на пару уровней вглубь по тому
+    же правилу, что и сортировщик: иначе блок падал бы с «нет папок
+    частей» при материале, который рядом. Готовый ролик в корне не
+    считается материалом — части важнее.
     """
-    names = sorter.part_names()
-    for base in (root,) + tuple(sorted(
-            [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else [],
-            key=lambda p: p.name)):
-        got = {k: (base / names[k]) for k in ("standup", "broll", "interview")
-               if (base / names[k]).is_dir()}
-        if len(got) >= 2:
-            got.setdefault("standup", None)
-            got.setdefault("broll", None)
-            got.setdefault("interview", None)
-            return {"standup": got.get("standup"), "broll": got.get("broll"),
-                    "interview": got.get("interview")}
-    return {k: None for k in ("standup", "broll", "interview")}
+    base = sorter.find_parts_base(root)
+    if base is None:
+        return {k: None for k in ("standup", "broll", "interview")}
+    got = sorter.parts_in(base)
+    return {k: got.get(k) for k in ("standup", "broll", "interview")}
 
 
 def videos(folder: Path):
