@@ -468,7 +468,10 @@ var COMMANDS = {
                " порт=" + (PORT || "-") +
                " файл=" + RESULT_FILE;
     runScript("'версия ' + app.version", function (res) {
-      cb(info + " | ExtendScript: " + res);
+      // Ответ начинается с OK|, чтобы /result отмечал диагностику
+      // как успешную, когда ExtendScript реально ответил.
+      var ok = (res !== undefined && String(res).indexOf("ERR|") !== 0);
+      cb((ok ? "OK|" : "ERR|") + info + " | ExtendScript: " + res);
     });
   },
 
