@@ -475,6 +475,14 @@ var COMMANDS = {
     });
   },
 
+  // Отладочная дверь: выполнить произвольное ExtendScript-выражение.
+  // Без неё поиск правильного API (например, импорта XML) требует
+  // переустановки панели на каждой попытке.
+  probe: function (args, cb) {
+    var expr = String(args.expr || "'версия ' + app.version");
+    runScript(expr, function (res) { cb(String(res)); });
+  },
+
   // Импорт готовой рыбы в проект: XML ложится в проект и создаёт
   // секвенцию, человек ничего не кликает.
   import_xml: function (args, cb) {
