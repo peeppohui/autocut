@@ -187,8 +187,20 @@ var NODE_CHILD = nodeRequire("child_process");
 
 var RESULT_FILE = "";
 try {
-  RESULT_FILE = (NODE_OS ? NODE_OS.tmpdir() : ".") + "/autocut_result.txt";
+  // Node в панели Premiere 26 может не загрузиться (проверено: os
+  // появляется, http и fs нет), поэтому путь к результату нужен и
+  // без Node. Расширение ставится в папку пользователя — она
+  // редактируемая, файл результата ложится рядом с panel.js.
+  RESULT_FILE = (NODE_OS ? NODE_OS.tmpdir() : workDir()) + "/autocut_result.txt";
 } catch (e) { RESULT_FILE = "autocut_result.txt"; }
+
+// Каталог панели из file:///... URL — запасной tmpdir без Node.
+function workDir() {
+  try {
+    var m = String(window.location.pathname || "").match(/^(.+)\/[^/]+$/);
+    return m ? decodeURI(m[1]) : ".";
+  } catch (e) { return "."; }
+}
 
 // Аварийный журнал панели. Если HTML отрисовался, но скрипт упал,
 // в обычном логе CEP не будет ни строки — пишем ошибки сами.
@@ -347,18 +359,30 @@ function startEngine() {
   attempt();
 }
 
-function evalScript(script) {
+function evalScript(script, cb) {
   try {
-    if (window.__adobe_cep__ && window.__adobe_cep__.evalScript) {
-      return window.__adobe_cep__.evalScript(script);
+    if (!(window.__adobe_cep__ && window.__adobe_cep__.evalScript)) {
+      return "ERR|панель не в Premiere";
     }
+
+    // Обычный CEP отдаёт результат ТОЛЬКО через колбэк: вызов с одним
+    // аргументом нигде не выполняется и значение не возвращает. Файл
+    // здесь запасной канал: если колбэк не пришёл, ExtendScript пишет
+    // результат в него, и мы читаем через cep.fs.
+    window.__adobe_cep__.evalScript(script, cb || function() {});
+    return "";
   } catch (e) {
     return "ERR|" + e;
   }
-  return "ERR|панель не в Premiere";
 }
 
 function readResult() {
+  // Node в этой панели может не загрузиться, тогда остаётся
+  // встроенная ФС CEP: window.cep.fs.readFile -> {err, data}.
+  if (window.cep && window.cep.fs && window.cep.fs.readFile) {
+    try { return String(window.cep.fs.readFile(RESULT_FILE).data || ""); }
+    catch (e) { }
+  }
   if (!NODE_FS) { return ""; }
   try {
     return NODE_FS.readFileSync(RESULT_FILE, "utf8");
@@ -368,22 +392,36 @@ function readResult() {
 }
 
 // Выполнить скрипт и отдать его результат.
+// Результат едут двумя путями: синхронный возврат evalScript (не
+// везде работает) и файл. Маркер в начале файла страхует от
+// чтения результата прошлого вызова, если свой не успел записаться.
 function runScript(script, cb) {
   try { if (NODE_FS) { NODE_FS.unlinkSync(RESULT_FILE); } } catch (e) { }
+  var token = "r" + (new Date()).getTime();
   var wrapped =
     "(function(){" +
     "var __r='';" +
     "try{ __r=" + script + "; }catch(e){ __r='ERR|'+e.toString(); }" +
     "try{ var f=new File(" + q(RESULT_FILE) + ");" +
-    "if(f.open('w')){ f.write(String(__r)); f.close(); } }catch(e){}" +
+    "if(f.open('w')){ f.write('" + token + "\\n'+String(__r)); f.close(); } }catch(e){}" +
     "return __r;})()";
-  evalScript(wrapped);
-  // Файл пишется сразу, но дать ему долю секунды.
+  var ready = false;
+  var sync = evalScript(wrapped, function(res) {
+    // Канал колбэка — основной в CEP: использовать первым.
+    if (!ready && typeof res === "string" && res && res !== "undefined") {
+      ready = true; cb(res);
+    }
+  });
   var tries = 0;
   (function wait() {
-    var res = readResult();
-    if (res) { cb(res); return; }
-    if (tries++ > 40) { cb("ERR|не дождались результата"); return; }
+    // Синхронный возврат в Premiere 26 пустой, но где-то работает.
+    if (!ready && typeof sync === "string" && sync && sync !== "undefined") {
+      cb(sync); ready = true; return;
+    }
+    var res = readResult() || "";
+    var mark = token + "\n";
+    if (res.indexOf(mark) === 0) { cb(res.slice(mark.length)); ready = true; return; }
+    if (ready || tries++ > 99) { if (!ready) { cb("ERR|не дождались результата"); } return; }
     setTimeout(wait, 50);
   })();
 }
@@ -421,7 +459,10 @@ function importXml(path, cb) {
 var COMMANDS = {
   // Диагностика: чем именно мы говорим с Premiere.
   diag: function (args, cb) {
+    var ceps = window.cep && window.cep.fs && window.cep.fs.readFile;
     var info = "node=" + (NODE_HTTP ? "да" : "нет") +
+               " fs=" + (NODE_FS ? "да" : "нет") +
+               " cepfs=" + (ceps ? "да" : "нет") +
                " native=" + (window.__adobe_cep__ && window.__adobe_cep__.evalScript
                              ? "да" : "нет") +
                " порт=" + (PORT || "-") +
@@ -473,6 +514,48 @@ var COMMANDS = {
       "}catch(e){return 'ERR|' + e.toString();}})()", cb);
   }
 };
+
+// --- очередь команд ------------------------------------------------------
+//
+// Агент и панель разговаривают через одну очередь на движке. Раньше
+// команды клались в неё и висели: панель их не забирала, поэтому
+// `premiere_import` ждал ответа, которого никто не отправлял.
+//
+// Сервер держит `/next` до 20 секунд, так что это long-poll: запрос
+// висит, пока команда не появится, и не грузит процесс.
+
+var CMDBUSY = false;
+
+function pollCommands() {
+  if (!PORT) { setTimeout(pollCommands, 1000); return; }
+  if (CMDBUSY) { return; }
+  CMDBUSY = true;
+  getJson("/next", function (err, cmd) {
+    CMDBUSY = false;
+    if (err || !cmd || !cmd.cmd) { setTimeout(pollCommands, 700); return; }
+    runCommand(cmd);
+  });
+}
+
+function runCommand(cmd) {
+  var fn = COMMANDS[cmd.cmd];
+  var finished = false;
+  var done = function (res) {
+    if (finished) { return; }
+    finished = true;
+    var text = String(res == null ? "" : res);
+    var ok = text.indexOf("OK|") === 0;
+    log("команда " + cmd.cmd + ": " + text, ok ? "ok" : "err");
+    postJson("/result", {id: cmd.id, ok: ok, "данные": text},
+             function () { pollCommands(); });
+  };
+  if (!fn) { done("ERR|неизвестная команда " + cmd.cmd); return; }
+  try {
+    fn(cmd.args || {}, done);
+  } catch (e) {
+    done("ERR|" + e.toString());
+  }
+}
 
 // --- действия ------------------------------------------------------------
 
@@ -655,4 +738,5 @@ window.addEventListener("load", function () {
   }
   log("панель AutoCut поднялась", "dim");
   poll();
+  pollCommands();
 });

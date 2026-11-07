@@ -72,6 +72,12 @@ ok("панель знает PATH для ffmpeg",
    "shutil.which" in INSTALL)
 ok("установщик ищет манифест в CSXS",
    '"CSXS"' in INSTALL and '"manifest.xml"' in INSTALL)
+ok("панель забирает команды из очереди",
+   'getJson("/next"' in JS and "function pollCommands" in JS,
+   "команды агента висят без ответа, premiere_import не дождётся")
+ok("результат команды уходит в мост",
+   'postJson("/result"' in JS and "cmd.id" in JS,
+   "мост не узнает, чем кончился импорт")
 
 if fail:
     print("PANEL FAIL ({})".format(", ".join(fail)))
