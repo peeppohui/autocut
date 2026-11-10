@@ -269,6 +269,45 @@ with tempfile.TemporaryDirectory() as td:
     ok("XML с такой раскладкой собирается",
        not premiere.check_xml(odd_xml), str(premiere.check_xml(odd_xml)))
 
+    # =========================================================
+    # Колонка pos: соседние куски обязаны сцепляться по кадрам.
+    # Раньше начало считали round(pos*fps), а конец независимо из
+    # in/out — соседи расходились на ±1 кадр: перекрытия и дырки.
+    # Теперь конец каждого вычисляется из pos + длительность, а окно
+    # источника дожимается до окна таймлайна. Заодно: in=0 у
+    # источника не должен превращаться в 1.
+    # =========================================================
+    pos_csv = td / "pos.csv"
+    with open(pos_csv, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["file", "plan", "hero", "duration", "in", "out",
+                    "desc", "path", "track", "pos"])
+        w.writerow(["cam.mp4", "нарезка", "гость", 1.234, 10, 41,
+                    "вырезка", str(a), "V1", 0.0])
+        w.writerow(["ref.mp4", "нарезка", "ведущий", 2.0, 0, 50,
+                    "вырезка", str(b), "V1", 1.234])
+        w.writerow(["cam.mp4", "нарезка", "гость", 2.0, 5, 55,
+                    "вырезка", str(a), "V1", 3.234])
+    pos_clips = premiere.resolve_media(
+        premiere.load_timeline(pos_csv), td)
+    pos_xml = premiere.build_fcp7(list(pos_clips), fps=25)
+    items = pos_xml.findall(".//video/track/clipitem")
+    ok("все три куска с pos на одной дорожке", len(items) == 3,
+       str(len(items)))
+    ends = [(int(x.find("start").text), int(x.find("end").text))
+            for x in items]
+    ok("соседи сцеплены по кадрам",
+       all(ends[i][1] == ends[i + 1][0] for i in range(len(ends) - 1)),
+       str(ends))
+    wins = [int(x.find("out").text) - int(x.find("in").text) for x in items]
+    slots = [e - s for s, e in ends]
+    ok("окно источника равно окну таймлайна", wins == slots,
+       "{} против {}".format(wins, slots))
+    ok("in=0 не превращается в 1", items[1].find("in").text == "0",
+       items[1].find("in").text)
+    ok("XML с pos проходит check_xml",
+       not premiere.check_xml(pos_xml), str(premiere.check_xml(pos_xml)))
+
 print()
 if fail:
     print(f"MULTICAM FAIL ({len(fail)}): {fail}")

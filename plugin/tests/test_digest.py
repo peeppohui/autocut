@@ -305,17 +305,17 @@ ok("нарезки в рыбе больше половины",
    _share4.get("нарезка", 0) > 0.45,
    str({k: round(v, 2) for k, v in _share4.items()}))
 _nar4 = [r for r in _rows4 if r[0] == "нарезка"]
-# По эталону: пока идёт голос, нарезка идёт короткими вырезками; после
-# голоса — целыми клипами.
+# По эталону: нарезка — короткие вырезки по мере и поверх голоса, и в
+# хвосте (целые клипы 7–9 с из прошлого прогона отменены).
 _voice_end4 = max([r[6] + (r[3] - r[2]) for r in _rows4
                    if r[0] != "нарезка"] or [0])
 _over4 = [r for r in _nar4 if r[6] < _voice_end4]
 _tail4 = [r for r in _nar4 if r[6] >= _voice_end4]
 ok("вырезки нарезки поверх голоса не длиннее 2.6 с",
-   all((r[3] - r[2]) <= 2.6 + 0.01 for r in _over4),
+   all(1.0 < (r[3] - r[2]) <= 2.6 + 0.01 for r in _over4),
    str([round(r[3] - r[2], 2) for r in _over4[:6]]))
-ok("в хвосте нарезка целыми клипами",
-   all((r[3] - r[2]) > 2.6 or (r[2] - r[2]) == 0 for r in _tail4),
+ok("в хвосте нарезка вырезками той же меры",
+   all(1.0 < (r[3] - r[2]) <= 2.6 + 0.01 for r in _tail4),
    str([round(r[3] - r[2], 2) for r in _tail4[:6]]))
 ok("нарезка лежит на второй дорожке, голос на первой",
    all(r[5] == "V2" for r in _nar4) and
@@ -342,16 +342,18 @@ ok("одна тема не повторяется дважды", len(set(_used5)
 ok("нулевые веса IDF не роняют сравнение",
    THEME.score_text("стендап", "стендап", {"стендап": 0.0}) == 0.0, "")
 
-# Короткий клип в хвосте не годится (меньше 3 с). Раньше цикл помечал
-# его непригодным, но не исключал из подбора и возвращался к нему
-# снова — сборка зависала навсегда.
+# Короткий клип (2 с): мера 1.2 влезает в его окно, вырезки появляются,
+# но сборка не должна зависать. Раньше цикл помечал клип непригодным,
+# но не исключал из подбора и возвращался к нему снова — зависал навсегда.
 _short = [_seg2("C0020.MP4", "общий", "зрители", "стендап")]
 _labs = {s[0].name: {"text": s[3], "words": [], "dur": 2.0} for s in _short}
 _rows6 = DG.build_digest(_st, _short, [], _labs, THEME.idf(_labs), print, 100,
                          neural=False)
 ok("короткий клип в хвосте не зацикливает сборку",
-   isinstance(_rows6, list) and not [r for r in _rows6 if r[0] == "нарезка"],
-   str([(r[0], r[1].name) for r in _rows6]))
+   isinstance(_rows6, list) and
+   all(1.0 < (r[3] - r[2]) <= 2.6 + 0.01
+       for r in _rows6 if r[0] == "нарезка"),
+   str([(r[0], r[1].name, round(r[3] - r[2], 2)) for r in _rows6]))
 
 # стендап — один кусок с непрерывным звуком
 _words = [(w, i * 0.5, i * 0.5 + 0.4) for i, w in enumerate(
@@ -475,10 +477,10 @@ _arow = next(csv.DictReader((tmp / "plan_audio.csv").open(encoding="utf-8")))
 ok("звук рекордера — исходный файл, а не нарезка",
    _arow["audio"] == "звк/REC00016.WAV", _arow["audio"])
 ok("у звука рекордера свои in/out",
-   (_arow["audio_in"], _arow["audio_out"]) == ("6.20", "16.20"),
+   (_arow["audio_in"], _arow["audio_out"]) == ("6.2000", "16.2000"),
    str((_arow["audio_in"], _arow["audio_out"])))
 ok("длительность исходника и дорожка A2",
-   _arow["audio_duration"] == "60.00" and _arow["audio_track"] == "A2",
+   _arow["audio_duration"] == "60.0000" and _arow["audio_track"] == "A2",
    str((_arow["audio_duration"], _arow["audio_track"])))
 
 # build_digest должен вернуть исходник и его края, а не готовый WAV.

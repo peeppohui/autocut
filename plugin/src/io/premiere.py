@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bootstrap  # noqa: F401  — регистрирует src/modes в sys.path (нужен autocut)
 import settings
+from modes import recsound  # noqa: E402 — probe длины файла (ffprobe)
 
 # Параметры таймкода секвенции. ВНИМАНИЕ: drop_frame требует дробного
 # fps (29.97/59.94). При целом fps и drop_frame=true таймкод врёт, поэтому
@@ -171,8 +172,33 @@ def path_to_fileurl(abspath: str) -> str:
     return "file://localhost/" + _quote(p, safe="/:")
 
 
+def frames0(sec: float, fps: int) -> int:
+    """Кадры без клампа: 0 допустим, ибо «начало файла» — это in=0."""
+    return int(round(sec * fps))
+
+
 def frames(sec: float, fps: int) -> int:
-    return max(1, int(round(sec * fps)))
+    return max(1, frames0(sec, fps))
+
+
+_DUR_CACHE: Dict[str, float] = {}
+
+
+def file_frames(abspath: str, fps: int, fallback: int) -> int:
+    """Длина файла в кадрах: ffprobe с кэшем; без ffprobe — fallback.
+
+    <file><duration> обязан показывать длину ИСТОЧНИКА: раньше туда
+    писали out куска плана, и Premiere видел файлы обрезанными. ffprobe
+    есть у движка и нет у голой консоли/тестов — отвечает fallback,
+    чтобы экспорт не падал.
+    """
+    got = _DUR_CACHE.get(abspath)
+    if got is None:
+        got = recsound.probe_duration(Path(abspath))
+        _DUR_CACHE[abspath] = got
+    if got > 0.0:
+        return max(1, int(round(got * fps)))
+    return fallback
 
 
 def tc(fr: int, fps: int) -> str:
@@ -195,8 +221,8 @@ def take_window(c: Dict, fps: int, trim_rec: bool):
     # duration там = длина куска, а файл заведомо длиннее (in/out взяты из него).
     if c.get("src_in") is not None and c.get("src_out") is not None \
             and c["src_out"] > c["src_in"]:
-        src_in = frames(c["src_in"], fps)
-        src_out = frames(c["src_out"], fps)
+        src_in = frames0(c["src_in"], fps)
+        src_out = frames0(c["src_out"], fps)
         return max(src_out, orig), src_in, src_out, src_out - src_in
     if trim_rec and c.get("plan") in REC_DURATION:
         cap_f = frames(REC_DURATION[c["plan"]][1], fps)
@@ -207,7 +233,12 @@ def take_window(c: Dict, fps: int, trim_rec: bool):
 
 
 def _video_file_el(fid: str, c: Dict, orig: int, fps: int, width: int, height: int) -> ET.Element:
-    """Полное описание видеофайла как в родном экспорте FCP7."""
+    """Полное описание видеофайла как в родном экспорте FCP7.
+
+    <duration> — длина ИСТОЧНИКА по ffprobe: раньше сюда писали out
+    куска плана, и файлы выглядели обрезанными.
+    """
+    orig = file_frames(c["abspath"], fps, orig)
     f = ET.Element("file", id=fid)
     ET.SubElement(f, "name").text = c["file"]
     ET.SubElement(f, "pathurl").text = path_to_fileurl(c["abspath"])
@@ -243,7 +274,9 @@ def _video_file_el(fid: str, c: Dict, orig: int, fps: int, width: int, height: i
 def _audio_file_el(fid: str, c: Dict, orig: int, fps: int) -> ET.Element:
     """Полное описание аудиофайла. ВАЖНО: id уникальный (не совпадает
     с id видео-описания того же файла) и блок полный — дублирующиеся
-    и урезанные <file> молча роняют импорт в Premiere."""
+    и урезанные <file> молча роняют импорт в Premiere. <duration> —
+    длина источника по ffprobe, а не out куска плана."""
+    orig = file_frames(c["abspath"], fps, orig)
     f = ET.Element("file", id=fid)
     ET.SubElement(f, "name").text = c["file"]
     ET.SubElement(f, "pathurl").text = path_to_fileurl(c["abspath"])
@@ -439,10 +472,23 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         start = c.get("pos")
         if start is None:
             start = tpos.get(key, 0)
+            end = start + d
         else:
-            # колонка pos — в секундах, а таймлайн считается в кадрах
-            start = int(round(float(start) * fps))
-        end = start + d
+            # Колонка pos — в секундах, а таймлайн считается в кадрах.
+            # Соседние куски обязаны сцепляться точно: конец каждого
+            # вычисляется из (pos + длительность куска), а не из
+            # независимых округлений in/out — иначе у соседей
+            # расходится ±1 кадр (перекрытия и дырки в ryba.xml).
+            # Окно источника дожимаем до окна таймлайна: если окно
+            # источника длиннее окна на таймлайне, Premiere
+            # растягивает кусок.
+            sec_pos = float(c["pos"])
+            dur_sec = float(c.get("duration") or (d / fps))
+            start = frames0(sec_pos, fps)
+            end = frames0(sec_pos + dur_sec, fps)
+            d = max(1, end - start)
+            if src_out - src_in != d:
+                src_out = src_in + d
         tpos[key] = end
 
         if not only_audio:
@@ -549,7 +595,7 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
         a_in = c.get("audio_in")
         a_dur = c.get("audio_duration")
         if a_in is not None:
-            a_in_f = frames(a_in, fps)
+            a_in_f = frames0(a_in, fps)
             a_out_f = a_in_f + d
             if a_dur and a_dur > 0:
                 a_orig_f = frames(a_dur, fps)

@@ -633,14 +633,16 @@ def write_plan(rows, out_csv: Path, base: Path):
                 if value is None or value == "":
                     return ""
                 try:
-                    return "{:.2f}".format(float(value))
+                    # 4 знака: сетка 25 fps укладывается в 2 (0.04),
+                    # но 30 fps требует 4 (1/30). Точность не мешает.
+                    return "{:.4f}".format(float(value))
                 except (TypeError, ValueError):
                     return ""
 
             w.writerow([i, path.name, part, rel,
-                        "{:.2f}".format(src_in), "{:.2f}".format(src_out),
-                        "{:.2f}".format(src_out - src_in), desc, track,
-                        ("{:.2f}".format(pos) if pos != "" else ""), arel,
+                        "{:.4f}".format(src_in), "{:.4f}".format(src_out),
+                        "{:.4f}".format(src_out - src_in), desc, track,
+                        ("{:.4f}".format(pos) if pos != "" else ""), arel,
                         fmt_num(audio_in), fmt_num(audio_out),
                         fmt_num(audio_duration), audio_track])
     return out_csv
@@ -666,8 +668,10 @@ VOICE_GAP = 2.0
 # Порог «тот же сюжет». Фон сходства описаний нарезки: медиана 0.872,
 # p95 0.929, p99 0.950. Ниже фона отсекается всё подряд.
 SAME_SCENE = 0.95
-# Потолок целого куска нарезки: в эталоне 5.1-13.4 с.
-WHOLE_MAX = 13.0
+# Меры вырезки нарезки: 1.2-2.6 с, замер готового дайджеста (101.7 с
+# собран вырезками этих длин). Целые клипы (5-13 с) отменены: их всё
+# равно режет монтажёр, а в хвосте они вылезали за потолок хронометража.
+BROLL_MEASURES = (1.2, 1.55, 1.9, 2.25, 2.6)
 
 
 def build_digest(standup, broll, interviews, labels, weights, log,
@@ -679,9 +683,10 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     видна там, где голоса нет, и лежит под голосом там, где он есть:
     монтажёр гасит V1 и смотрит, что под ним.
 
-    **Что в нарезке.** В паузах голоса — ЦЕЛЫЕ клипы (5-13 с): в
-    эталоне 32 таких клипа на 210 с. Поверх голоса — короткие вырезки
-    (1.4-4.3 с) по теме реплики.
+    **Что в нарезке.** Поверх голоса и в паузах — короткие вырезки
+    по мере 1.2-2.6 с. Кусок обязан влезать в свой слот (до конца
+    реплики или до конца паузы): перекрытий внутри дорожки нарезки
+    быть не должно, в эталоне их нет.
 
     **Что в голосе.** Стендап — один непрерывный кусок (в эталоне
     23.7 с, разбит на шесть частей). Интервью — куски по 1-8 с, и
@@ -767,6 +772,21 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     nar_budget = target * SHARE_BROLL
     iv_budget = target - st_budget - nar_budget
 
+    # Кадровая сетка. Таймлайн Premiere считается целыми кадрами, и
+    # позиции плана обязаны на ней лежать: 23.22 с * 25 = 580.5 — ровно
+    # полкадра, конец куска округлялся вверх, а начало следующего вниз,
+    # и сосед налезал на соседа на кадр (в живом прогоне FX20028
+    # налезал на C0015). Квантование снимает развязки на уровне плана.
+    fps = int(cfg("project.fps", 25))
+
+    def qf(sec):
+        """Секунды -> ближайший кадр (на сетку)."""
+        return round(sec * fps) / fps
+
+    # Меры нарезки в кадрах: 1.55*25 = 38.75 нельзя записать в таймлайн,
+    # поэтому мера тоже квантуется (ближайший целый кадр).
+    mq = tuple(max(1, int(round(m * fps))) for m in BROLL_MEASURES)
+
     # Векторы подписей клипов: ими меряется и смысл, и повторяемость.
     # Считаются один раз: на каждый подбор заново считать дорого, а
     # клипов под сотню.
@@ -832,8 +852,14 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         lab = labels.get(seg[0].name) or {}
         return " ".join((lab.get("text") or "").split()).lower()
 
-    def take_broll(seg, pos):
+    def take_broll(seg, pos, limit=None):
         path, a, b, text, plan, hero = seg
+        # Кусок обязан влезать в свой слот: иначе он налезает на
+        # следующий кусок нарезки, а перекрытий внутри дорожки в
+        # эталоне нет. Длина окна — целое число кадров: соседние
+        # куски сцепляются в XML без полукадровых развязок.
+        eff = (b - a) if limit is None else min(limit, b - a)
+        b = a + max(1, int(eff * fps + 1e-6)) / fps
         used.add(path.name)
         recent.append(path.name)
         history.append((plan, hero))
@@ -843,19 +869,6 @@ def build_digest(standup, broll, interviews, labels, weights, log,
             used_themes.add(key)
         nar_spent[0] += b - a
         return ("нарезка", path, a, b, text[:140], BROLL_TRACK, pos)
-
-    def whole_clip(seg):
-        """Тот же клип, но целиком: с нуля до конца файла.
-
-        В паузах голоса нарезка идёт целыми кусками (5-13 с) — так в
-        эталоне. Короткие вырезки нужны только поверх голоса.
-        """
-        path, a, b, text, plan, hero = seg
-        lab = labels.get(path.name) or {}
-        dur = float(lab.get("dur") or 0.0)
-        if dur <= 0.0:
-            return seg
-        return (path, 0.0, dur, text, plan, hero)
 
     def pick_for(text, limit):
         """Клипы под тему текста: по описанию кадра и по его звуку."""
@@ -900,12 +913,13 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     for path, i, o, text, chunk in standup:
         if (o - i) > st_budget and rows:
             break
-        rows.append(("стендап", path, i, o, text[:200], VOICE_TRACK, t,
-                     voice_audio(path, i, o, chunk)))
-        spoken.append((t, t + (o - i), text))
+        d = qf(o - i)
+        rows.append(("стендап", path, i, i + d, text[:200], VOICE_TRACK, t,
+                     voice_audio(path, i, i + d, chunk)))
+        spoken.append((t, t + d, text))
         standup_text += " " + text
-        t += (o - i)
-    t += VOICE_GAP
+        t += d
+    t += qf(VOICE_GAP)
     for n, (path, pieces, words) in enumerate(interviews):
         if n:
             t += VOICE_GAP
@@ -929,11 +943,11 @@ def build_digest(standup, broll, interviews, labels, weights, log,
                     rec_hit[0], rec_hit[1], rec_hit[2]))
         left = iv_budget
         for i, o, text, chunk in pieces:
-            d = o - i
+            d = qf(o - i)
             if left <= 0 or (t + d) > target:
                 break
-            rows.append(("интервью", path, i, o, text[:200], VOICE_TRACK, t,
-                         voice_audio(path, i, o, chunk, rec_hit)))
+            rows.append(("интервью", path, i, i + d, text[:200], VOICE_TRACK, t,
+                         voice_audio(path, i, i + d, chunk, rec_hit)))
             voice.append((t, t + d, text))
             spoken.append((t, t + d, text))
             t += d
@@ -945,16 +959,26 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     # в эталоне такого нет, а монтажёр такое видит как «монтаж не сделан».
     #
     # Поверх голоса — короткая вырезка по теме реплики: монтажёр гасит
-    # V1 и видит, что под голосом.
+    # V1 и видит, что под голосом. Кусок не длиннее меры и не вылезает
+    # за конец реплики: иначе он налезает на следующий кусок нарезки
+    # (в живом прогоне C0062 вылезал поверх C0069 на 1.2 с).
+    measure_i = 0
     for start, end, text in voice:
         if nar_spent[0] >= nar_budget:
             break
+        slot = end - start
+        if slot < BROLL_MEASURES[0]:
+            continue
         for seg in pick_for(text, 1):
-            rows.append(take_broll(seg, start))
+            limit = min(mq[measure_i % len(mq)],
+                        max(1, int(slot * fps + 1e-6))) / fps
+            measure_i += 1
+            rows.append(take_broll(seg, start, limit=limit))
             break
 
     # В паузах голоса — продолжение темы: берём нарезку по словам
-    # последней сказанной реплики.
+    # последней сказанной реплики. Меры те же, пауза ограничивает
+    # кусок сверху.
     gaps = []
     prev = 0.0
     last_text = standup_text.strip()
@@ -963,6 +987,7 @@ def build_digest(standup, broll, interviews, labels, weights, log,
             gaps.append((prev, start, last_text))
         prev = end
         last_text = text
+    measure_i = 0
     for start, end, theme_text in gaps:
         pos = start
         while pos < end - 0.5 and nar_spent[0] < nar_budget:
@@ -972,44 +997,61 @@ def build_digest(standup, broll, interviews, labels, weights, log,
                 break
             if seg is None:
                 break
-            dur = min(seg[2] - seg[1], end - pos)
-            if dur < 1.0:
+            limit = min(mq[measure_i % len(mq)],
+                        max(1, int((end - pos) * fps + 1e-6))) / fps
+            measure_i += 1
+            if limit < 1.0:
                 break
-            row = take_broll(seg, pos)
-            rows.append((row[0], row[1], row[2], row[2] + dur, row[4],
-                         row[5], pos))
-            pos += dur
-            nar_spent[0] -= (seg[2] - seg[1]) - dur
+            row = take_broll(seg, pos, limit=limit)
+            rows.append(row)
+            pos += row[3] - row[2]
 
-    # Хвост после голоса — ЦЕЛЫМИ клипами, как в эталоне: там голоса
-    # нет, и идёт «показываем мероприятие» кусками по 5-13 с.
-    # Тема хвоста — последние сказанные слова: они и задают, что мы
-    # показываем в конце. Подряд «просто оставшиеся клипы» не берём
-    # никогда: монтажёр такое видит как «монтаж не сделан».
+    # Хвост после голоса — вырезки той же меры 1.2-2.6 с, что и
+    # остальная нарезка. Целые клипы отменены: реальные куски выходили
+    # по 7.7-9.6 с, а их всё равно режет монтажёр. Тема хвоста —
+    # последние сказанные слова: они и задают, что мы показываем в
+    # конце. Подряд «просто оставшиеся клипы» не берём никогда:
+    # монтажёр такое видит как «монтаж не сделан».
+    def leftover_cand():
+        """Дозаполнение хвоста, когда по теме последних слов подходящих
+        не осталось. Хвост по бюджету длиннее одной темы: раньше это
+        сходилось, потому что каждый кандидат сжигал 9 с клипа, теперь
+        по 2.6 с максимум — кандидаты по одной теме кончаются за пару
+        тысяч кадров. Остальные берём по тем же правилам отбора: не тот
+        же сюжет, не соседние номера, не два одинаковых плана подряд.
+        """
+        for seg in broll:
+            name = seg[0].name
+            if name in used or too_similar(name):
+                continue
+            if not varied(seg) or near_number(name):
+                continue
+            key = theme_key(seg)
+            if key and key in used_themes:
+                continue
+            return seg
+        return None
+
     tail_theme = (voice[-1][2] if voice else standup_text) or standup_text
     pos = voice_end
-    while nar_spent[0] < nar_budget:
+    measure_i = 0
+    while nar_spent[0] < nar_budget and pos < target - 1.0:
         seg = None
         for cand in pick_for(tail_theme, 1):
             seg = cand
             break
         if seg is None:
+            seg = leftover_cand()
+        if seg is None:
             break
-        whole = whole_clip(seg)
-        dur = whole[2] - whole[1]
-        if dur < 3.0:
-            # Короткий клип в хвост не годится. Помечаем его взятым,
-            # иначе pick_for вернёт его снова, и цикл не кончится.
-            used.add(seg[0].name)
-            continue
-        # В эталоне целые куски 5.1-13.4 с. Клипы нарезки бывают и по
-        # 27 с — такой кусок занимает пол-экрана, и монтажёр всё равно
-        # его режет. Поэтому длинные режем.
-        if dur > WHOLE_MAX:
-            whole = (whole[0], 0.0, WHOLE_MAX, whole[3], whole[4], whole[5])
-            dur = WHOLE_MAX
-        rows.append(take_broll(whole, pos))
-        pos += dur
+        limit = min(mq[measure_i % len(mq)],
+                    max(1, int((target - pos) * fps + 1e-6))) / fps
+        measure_i += 1
+        if limit < 1.0:
+            break
+        row = take_broll(seg, pos, limit=limit)
+        rows.append(row)
+        pos += row[3] - row[2]
     return rows
 
 
@@ -1211,7 +1253,11 @@ def main(argv=None) -> int:
 
     plan = write_plan(rows, out_dir / "plan.csv", base)
     shelf = write_shelf(broll, labels, plans, rows, out_dir / "shelf.csv")
-    total = sum(r[3] - r[2] for r in rows)
+    # Хронометраж — конец таймлайна (позиция + длительность последнего
+    # куска), а не сумма кусков: нарезка лежит двумя слоями поверх
+    # голоса, и сумма кусков больше ролика. В живом прогоне сумма дала
+    # 117.6 с, а конец таймлайна — 97.9 с.
+    span = max(r[6] + (r[3] - r[2]) for r in rows)
     log("\nПлан: " + str(plan))
     log("Полка для монтажёра: " + str(shelf))
     log("Кусов: {} (стендап {}, нарезка {}, интервью {})".format(
@@ -1219,9 +1265,9 @@ def main(argv=None) -> int:
         len([r for r in rows if r[0] == "стендап"]),
         len([r for r in rows if r[0] == "нарезка"]),
         len([r for r in rows if r[0] == "интервью"])))
-    log("Хронометраж: {:.1f}с (потолок {:.0f}с)".format(total, target))
-    if total > target:
-        log("  ПРЕВЫШЕНИЕ на {:.1f}с".format(total - target))
+    log("Хронометраж: {:.1f}с (потолок {:.0f}с)".format(span, target))
+    if span > target:
+        log("  ПРЕВЫШЕНИЕ на {:.1f}с".format(span - target))
     return 0
 
 
