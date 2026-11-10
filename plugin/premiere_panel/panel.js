@@ -421,7 +421,10 @@ function runScript(script, cb) {
     var res = readResult() || "";
     var mark = token + "\n";
     if (res.indexOf(mark) === 0) { cb(res.slice(mark.length)); ready = true; return; }
-    if (ready || tries++ > 99) { if (!ready) { cb("ERR|не дождались результата"); } return; }
+    // Импорт XML и большой readback проекта идут дольше 5 секунд: без
+    // запаса панель сделала бы работу и «потеряла» результат, как уже
+    // случилось с import_xml. 600 шагов по 50 мс = запас 30 с.
+    if (ready || tries++ > 599) { if (!ready) { cb("ERR|не дождались результата"); } return; }
     setTimeout(wait, 50);
   })();
 }
@@ -435,12 +438,14 @@ function q(s) {
 }
 
 // Импорт готовой рыбы в проект и открытие секвенции.
+// В Premiere 26 importXML нет — то же ветвление, что в команде import_xml.
 function importXml(path, cb) {
   var script =
     "(function(){try{" +
     "var f=new File(" + q(winPath(path)) + ");" +
     "if(!f.exists){return 'ERR|нет файла ' + f.fsName;}" +
-    "app.project.importXML(f);" +
+    "if(typeof(app.project.importXML)==='function'){app.project.importXML(f);}" +
+    "else{app.project.importFiles(f.fsName,false,null,false);}" +
     "return 'OK|XML импортирован: ' + f.name;" +
     "}catch(e){return 'ERR|' + e.toString();}})()";
   runScript(script, function (res) {
@@ -485,6 +490,11 @@ var COMMANDS = {
 
   // Импорт готовой рыбы в проект: XML ложится в проект и создаёт
   // секвенцию, человек ничего не кликает.
+  //
+  // В Premiere 26 нет `app.project.importXML` (доказано probe-командой
+  // в живом проекте), зато `importFiles` с XML в аргументах импортирует
+  // XML вместе с секвенцией. Выбор делаем в ExtendScript: имя проверки
+  // через `typeof` не должно ронять строку.
   import_xml: function (args, cb) {
     var p = winPath(args.path || "");
     if (!p) { cb("ERR|не указан путь"); return; }
@@ -492,7 +502,8 @@ var COMMANDS = {
       "(function(){try{" +
       "var f=new File(" + q(p) + ");" +
       "if(!f.exists){return 'ERR|нет файла ' + f.fsName;}" +
-      "app.project.importXML(f);" +
+      "if(typeof(app.project.importXML)==='function'){app.project.importXML(f);}" +
+      "else{app.project.importFiles(f.fsName,false,null,false);}" +
       "return 'OK|XML импортирован: ' + f.name;" +
       "}catch(e){return 'ERR|' + e.toString();}})()", cb);
   },

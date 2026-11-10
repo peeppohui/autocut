@@ -34,9 +34,9 @@ def ok(name, cond, detail=""):
 
 ok("XML импортируется через importXML",
    "app.project.importXML(f)" in JS)
-ok("importFiles больше не используется",
-   "app.project.importFiles" not in JS,
-   "панель снова импортирует XML как обычный файл")
+ok("в Premiere 26 есть запасной путь через importFiles",
+   "app.project.importFiles(f.fsName,false,null,false)" in JS,
+   "Premiere 26.3.2 доказал отсутствие importXML живым проектом")
 ok("импорт вызывается с колбэком",
    "importXml(xml, function" in JS,
    "watchTask не дождётся результата импорта")
