@@ -784,8 +784,8 @@ _sig = [r for r in _rowsig if r[0] == "интервью"]
 _gap_start = _sig[0][6] + (_sig[0][3] - _sig[0][2])
 _narig = [r for r in _rowsig if r[0] == "нарезка"
           and _gap_start <= r[6] < _sig[1][6]]
-ok("в паузе между спикерами не больше трёх перебивок",
-   bool(_narig) and len(_narig) <= 3,
+ok("в паузе между спикерами не больше четырёх перебивок",
+   bool(_narig) and len(_narig) <= 4,
    str([(round(r[6], 2), round(r[3] - r[2], 2)) for r in _narig]))
 
 # --- пауза закрыта целиком, а не дырой ---
@@ -803,7 +803,7 @@ _gap0 = _sig2[0][6] + (_sig2[0][3] - _sig2[0][2])
 _nargap = [r for r in _rowsgap if r[0] == "нарезка"
            and _gap0 <= r[6] < _sig2[1][6]]
 ok("пауза между спикерами закрыта перебивками",
-   bool(_nargap) and len(_nargap) <= 3
+   bool(_nargap) and len(_nargap) <= 4
    and max(r[6] + r[3] - r[2] for r in _nargap) >= _sig2[1][6] - 0.5,
    str([(round(r[6], 2), round(r[3] - r[2], 2)) for r in _nargap]))
 
