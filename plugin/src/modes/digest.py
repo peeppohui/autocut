@@ -29,6 +29,7 @@ import argparse
 import csv
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -92,6 +93,12 @@ def videos(folder: Path):
 PHRASE_GAP = 0.45
 MAX_PIECE = 4.5
 MIN_PIECE = 1.2
+# Тишина, отделяющая один заход речи от другого. Спикер в интервью
+# говорит рывками; «лучший монолог» — самый длинный кусок без такого
+# молчания. Определено здесь, а не ниже: best_monologue() берёт его
+# значением по умолчанию, и константа должна быть видима к моменту
+# определения функции.
+MONO_GAP = 2.0
 # Стендап режется крупнее: в ролике корреспондента сменяли ракурсы раз
 # в 2–4 секунды, но ЗВУК шёл непрерывно. Резать один дубль на куски по
 # две секунды — значит жевать слова: «6 научных фронтов» отдельным куском
@@ -341,6 +348,36 @@ def best_run(words, budget):
     return (i, o, text, list(run))
 
 
+def best_monologue(words, gap=MONO_GAP):
+    """Лучший заход речи: самый длинный кусок без длинного молчания.
+
+    Спикер в интервью говорит рывками: короткая реплика, пауза, снова
+    речь. Весь файл в эфир не годится — получается «набор кадров», и
+    интервью в таймлайне теряется. Берём один заход, где спикер дольше
+    всего говорит, и режем его на фразы: паузы внутри монолога
+    вырезаются, зритель слышит связную речь.
+    """
+    if not words:
+        return []
+    runs = []
+    cur = []
+    prev_end = None
+    for w in words:
+        if prev_end is not None and w[1] - prev_end > gap:
+            if cur:
+                runs.append(cur)
+            cur = []
+        cur.append(w)
+        prev_end = w[2]
+    if cur:
+        runs.append(cur)
+
+    def speech(run):
+        return sum(max(0.0, e - s) for _w, s, e in run)
+
+    return max(runs, key=lambda r: (speech(r), r[-1][2] - r[0][1]))
+
+
 def process_interviews(folder: Path, work: Path, model_name, device, log,
                        budget=None):
     """Ответы спикеров, нарезанные по фразам.
@@ -349,11 +386,15 @@ def process_interviews(folder: Path, work: Path, model_name, device, log,
     список кусков. Редактор режет интервью по границам фраз: кусок
     «На решение отводится час» (1.16 с) стоит отдельно и не
     обрезается посередине. Поэтому кусков много и они короткие.
+
+    Из файла берётся не начало, а ЛУЧШИЙ МОНОЛОГ спикера — самый
+    длинный заход речи без длинного молчания. Начало файла может быть
+    разгоном или ответом на чужой вопрос, и тогда в эфир уходит огрызок.
     """
     files = videos(folder)
     if not files:
         return []
-    per = float(cfg("interview_answer_sec", 15.0))
+    per = float(cfg("interview_answer_sec", 30.0))
     if budget and files:
         # На всех спикеров делим остаток поровну, но не меньше половины
         # ответа: обрезанный на 5с ответ в эфире не читается.
@@ -365,11 +406,15 @@ def process_interviews(folder: Path, work: Path, model_name, device, log,
         if not words:
             log("  {}: речи нет, пропускаю".format(p.name))
             continue
-        pieces = phrase_pieces(words, limit_sec=per)
+        mono = best_monologue(words)
+        if not mono:
+            continue
+        pieces = phrase_pieces(mono, limit_sec=per)
         if not pieces:
             continue
-        log("  {}: {} кусков по фразам, {:.0f}с".format(
-            p.name, len(pieces), sum(o - i for i, o, _t, _c in pieces)))
+        log("  {}: монолог {:.0f}с, {} кусков по фразам, {:.0f}с".format(
+            p.name, mono[-1][2] - mono[0][1], len(pieces),
+            sum(o - i for i, o, _t, _c in pieces)))
         out.append((p, pieces, words))
     return out
 
@@ -660,13 +705,66 @@ def write_plan(rows, out_csv: Path, base: Path):
     return out_csv
 
 
+# Музыка — фон, а не второй голос. На стендапе и интервью она должна
+# уйти вниз: иначе перебивает речь (правка пользователя). Громкость в
+# XML Premiere читает непредсказуемо, поэтому приглушаем сам файл —
+# ffmpeg умеет менять громкость по интервалам времени.
+DUCK_LEVEL = 0.30
+
+
+def duck_filter(spans, level=DUCK_LEVEL):
+    """Фильтр ffmpeg: приглушить музыку на интервалах речи.
+
+    spans — [(начало, конец), ...] в секундах таймлайна.
+    """
+    expr = "+".join("between(t,{:.2f},{:.2f})".format(a, b)
+                    for a, b in spans if b > a)
+    if not expr:
+        return ""
+    return "volume={:.2f}:enable='{}'".format(level, expr)
+
+
+def duck_music(music, rows, work, log, level=DUCK_LEVEL):
+    """Приглушить музыку там, где говорит спикер.
+
+    Исходник не трогаем: приглушённая копия ложится в work, и в плане
+    на неё ссылается строка «музыка».
+    """
+    spans = []
+    for row in rows:
+        part = row[0]
+        if part not in ("стендап", "интервью"):
+            continue
+        pos = float(row[6])
+        spans.append((pos, pos + (float(row[3]) - float(row[2]))))
+    if not spans:
+        return None
+    filt = duck_filter(spans, level)
+    out = Path(work) / "music_duck.mp3"
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(music), "-af", filt,
+           "-c:a", "libmp3lame", "-b:a", "192k", str(out)]
+    try:
+        rc = subprocess.call(cmd)
+    except OSError as e:
+        log("Музыка: приглушить не удалось ({})".format(e))
+        return None
+    if rc != 0 or not out.exists() or out.stat().st_size < 1024:
+        log("Музыка: приглушить не удалось, оставляем как есть")
+        return None
+    return out
+
+
 # Доли экранного времени. Замер на готовом дайджесте по совпавшим
 # кадрам: нарезка 55.4 с из 101.7 (55%), интервью 24.6 с (24%),
 # стендап 21.7 с (21%). Нарезка идёт первой по замыслу: «сначала
 # ведущий объясняет, потом показываем, потом даём голос участникам» —
 # и в готовом ролике показывают больше половины времени.
+#
+# Доля нарезки уменьшена: в прошлой сборке интервью занимало 8-9 с и
+# зритель считал, что его «съели» перебивки. Голос участника — это и
+# есть интервью, ему отдаём больше времени, нарезка идёт в хвост.
 SHARE_STANDUP = 0.21
-SHARE_BROLL = 0.55
+SHARE_BROLL = 0.45
 
 # Дорожки сборки. В эталонном проекте голос лежит на V1, нарезка — на
 # V2 отдельным слоем: Premiere показывает нарезку там, где голоса нет,
@@ -693,6 +791,19 @@ SAME_SCENE = 0.95
 # собран вырезками этих длин). Целые клипы (5-13 с) отменены: их всё
 # равно режет монтажёр, а в хвосте они вылезали за потолок хронометража.
 BROLL_MEASURES = (1.2, 1.55, 1.9, 2.25, 2.6)
+
+# Сколько перебивок можно положить поверх интервью и в паузу между
+# спикерами. Правка пользователя: «на перебивки интервьюшек мы
+# используем всего 3 кадра, а не 8». В эталоне над интервью C0098
+# ровно 3 перебивки (C0083, C0054, C0088) — столько и кладём.
+IV_BROLL_MAX = 3
+GAP_BROLL_MAX = 3
+# В паузе куски длиннее обычной меры: три куска по 2.6 с не закрывают
+# паузу в 13 с, и на таймлайне остаётся дыра. Эталон в паузе кладёт
+# куски по 2.9-4.3 с.
+GAP_MAX_LEN = 4.5
+# MONO_GAP живёт в блоке констант речи выше: best_monologue() берёт его
+# значением по умолчанию.
 
 
 def otbor_rows(rows, parts):
@@ -1090,13 +1201,15 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     standup_end = t
     t += qf(GAP_AFTER_STANDUP)
     prev_end = None      # конец голоса предыдущего ВЗЯТОГО спикера
-    for path, pieces, words in interviews:
+    for spk_no, (path, pieces, words) in enumerate(interviews):
         # Звук с рекордера ищем ОДИН РАЗ на спикера, а не на каждый
         # кусок: короткий кусок в два-три слова рекордеру не
         # соответствует, и звук терялся у половины кусков. Сопоставляем
-        # по ВЫБРАННЫМ ответам, а не по началу файла: в рекордере вопрос
-        # ведущего сформулирован иначе и якорь по нему не срабатывает.
-        ans_words = [w for piece in pieces for w in piece[3]]
+        # по ВСЕМ словам ответа, а не по началу файла: в рекордере
+        # вопрос ведущего сформулирован иначе и якорь по нему не
+        # срабатывает. Слова берём целиком (монолог — это только
+        # отобранный кусок), иначе совпадение может не найтись.
+        ans_words = words
         rec_hit = sync_hit(path, ans_words, pieces[0][0] if pieces else 0.0)
         if rec_index and rec_hit[0] is None:
             # Спикер без звуковой пары с рекордером не берётся: без
@@ -1132,7 +1245,13 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         for pt0, pt1, text in spans:
             s0 = max(pt0, spk_t0 + OVR_OPEN)
             if pt1 - s0 >= 1.0:
-                slots.append((s0, pt1, text, False))
+                # Поверх одного интервью — не больше IV_BROLL_MAX
+                # перебивок: иначе голос участника исчезает под нарезкой
+                # (жалоба пользователя на прошлую сборку).
+                slots.append({"s": s0, "e": pt1, "theme": text,
+                              "leftover": False, "cap": IV_BROLL_MAX,
+                              "group": "iv{}".format(spk_no),
+                              "maxlen": None})
     voice_end = t
 
     if music is not None and voice_end > 0.5:
@@ -1164,9 +1283,18 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     # V1/V2 выдавала бы недоделанный монтаж.
     prev = 0.0
     last_text = standup_text.strip()
+    gap_no = 0
     for start, end, text in sorted(spoken):
         if start - prev > 0.5:
-            slots.append((prev, start, last_text, False))
+            # Пауза между спикерами — это тоже «перебивки интервьюшек»:
+            # в прошлой сборке их шло 8 подряд, и интервью в таймлайне
+            # пропадало. Кладём GAP_BROLL_MAX кусков, зато длиннее:
+            # пауза закрывается целиком, без дыр.
+            slots.append({"s": prev, "e": start, "theme": last_text,
+                          "leftover": False, "cap": GAP_BROLL_MAX,
+                          "group": "gap{}".format(gap_no),
+                          "maxlen": GAP_MAX_LEN})
+            gap_no += 1
         prev = end
         last_text = text
 
@@ -1198,15 +1326,30 @@ def build_digest(standup, broll, interviews, labels, weights, log,
 
     tail_theme = (voice[-1][2] if voice else standup_text) or standup_text
     if target - voice_end >= 1.0:
-        slots.append((voice_end, target, tail_theme, True))
+        slots.append({"s": voice_end, "e": target, "theme": tail_theme,
+                      "leftover": True, "cap": None, "group": None,
+                      "maxlen": None})
 
     # Раскладка слотов по таймлайну: сначала ранние (J-cut уже стоит),
     # паузы и хвост получают бюджет раньше далёких оверлеев.
-    slots.sort(key=lambda s: s[0])
+    slots.sort(key=lambda s: s["s"])
     measure_i = 0
-    for start, end, theme_text, allow_leftover in slots:
+    counts = {}            # сколько перебивок уже лежит в группе
+    for slot in slots:
+        start, end = slot["s"], slot["e"]
+        theme_text = slot["theme"]
+        allow_leftover = slot["leftover"]
+        cap = slot.get("cap")
+        grp = slot.get("group")
+        maxlen = slot.get("maxlen")
+        # Имя не `used`: выше `used` — множество уже взятых клипов, и
+        # перебивка его затирала (пикер получал число вместо множества).
+        used_in_grp = counts.get(grp, 0) if grp else 0
+        left = (cap - used_in_grp) if (cap and grp) else None
         pos = start
         while pos < end - 0.5 and nar_spent[0] < nar_budget:
+            if left is not None and left <= 0:
+                break
             seg = None
             for cand in pick_for(theme_text, 1):
                 seg = cand
@@ -1215,14 +1358,24 @@ def build_digest(standup, broll, interviews, labels, weights, log,
                 seg = leftover_cand()
             if seg is None:
                 break
-            limit = min(mq[measure_i % len(mq)],
-                        max(1, int((end - pos) * fps + 1e-6))) / fps
+            room = max(1, int((end - pos) * fps + 1e-6)) / fps
+            if maxlen:
+                # В паузе кусок длиннее обычной меры: иначе лимит в
+                # 3 кадра оставит в паузе дыру.
+                share = room / left if left else room
+                limit = min(maxlen, room, share)
+            else:
+                limit = min(mq[measure_i % len(mq)], room)
             measure_i += 1
             if limit < 1.0:
                 break
             row = take_broll(seg, pos, limit=limit)
             rows.append(row)
             pos += row[3] - row[2]
+            if left is not None:
+                left -= 1
+                used_in_grp += 1
+                counts[grp] = used_in_grp
     return rows
 
 
@@ -1442,6 +1595,16 @@ def main(argv=None) -> int:
 
     rows = build_digest(front, broll, back, labels, weights, log, target,
                         rec=rec, music=music)
+
+    # Музыка на стендапе и интервью уходит вниз — она фон, а не второй
+    # голос. Приглушаем сам файл (копию в work), исходник не трогаем.
+    if music is not None:
+        ducked = duck_music(music, rows, work, log)
+        if ducked is not None:
+            rows = [r[:7] + (str(ducked),) if r[0] == "музыка" else r
+                    for r in rows]
+            log("Музыка: приглушена на стендапе и интервью ({})"
+                .format(ducked.name))
 
     if not rows:
         print("Собрать нечего: все три части пустые.")
