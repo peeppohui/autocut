@@ -1048,9 +1048,8 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         t += d
     standup_end = t
     t += qf(GAP_AFTER_STANDUP)
-    for n, (path, pieces, words) in enumerate(interviews):
-        if n:
-            t += qf(GAP_BETWEEN_SPEAKERS)
+    prev_end = None      # конец голоса предыдущего ВЗЯТОГО спикера
+    for path, pieces, words in interviews:
         # Звук с рекордера ищем ОДИН РАЗ на спикера, а не на каждый
         # кусок: короткий кусок в два-три слова рекордеру не
         # соответствует, и звук терялся у половины кусков. Сопоставляем
@@ -1062,10 +1061,14 @@ def build_digest(standup, broll, interviews, labels, weights, log,
             # Спикер без звуковой пары с рекордером не берётся: без
             # сдвига куски играют чужим или камерным звуком — тот самый
             # «набор каких-то звуков» из фидбэка. В эталоне у такого
-            # соседа-дубля записи в рекордере просто нет.
+            # соседа-дубля записи в рекордере просто нет. Снятый спикер
+            # и паузы не добавляет: между соседними ВЗЯТЫМИ спикерами
+            # ровно один промежуток, иначе сборка раздувается вдвое.
             log("  Интервью: {} не сведён с рекордером — не берём"
                 .format(Path(path).name))
             continue
+        if prev_end is not None:
+            t = prev_end + qf(GAP_BETWEEN_SPEAKERS)
         left = iv_budget
         spk_t0 = t
         spans = []          # куски спикера на таймлайне
@@ -1080,6 +1083,8 @@ def build_digest(standup, broll, interviews, labels, weights, log,
             spans.append((t, t + d, text))
             t += d
             left -= d
+        if spans:
+            prev_end = t
         # Слоты перебивок поверх реплик. Первые OVR_OPEN секунд спикера
         # открыты: зритель должен увидеть, кто говорит, — первую реплику
         # не перекрываем (в эталоне спикер открыт ~8 с).
