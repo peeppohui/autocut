@@ -129,6 +129,10 @@ def load_timeline(path: Path) -> List[Dict]:
                 # дорожка для отдельного звука (A2/A3/...); пусто = по имени
                 # источника, как у раздельных микрофонов интервью
                 "audio_track": (row.get("audio_track") or "").strip().upper(),
+                # колонка sound из digest-плана: "нет" = клип выкладывается
+                # без звукового клипа вовсе (перебивки поверх речи и в
+                # паузах: там играет рекордер или музыка)
+                "sound": (row.get("sound") or "").strip().lower(),
                 # дорожка: V1/V2/... для видео со связанным звуком,
                 # A2/A3/... для звука без картинки (подложка, закадр)
                 "track": (row.get("track") or "").strip().upper(),
@@ -397,6 +401,11 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     for c in clips:
         if audio_only(c):
             continue
+        if c.get("sound") == "нет":
+            # Перебивка без звука дорожку не занимает: в эталоне звук в
+            # паузах несёт музыка, а не шум зала вырезки. Иначе появилась
+            # бы L:V2 с шумом, глушившим интервью.
+            continue
         track = c.get("audio_track")
         if track in AUDIO_TRACKS:
             name = f"X:{track}"
@@ -467,6 +476,9 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
     for i, c in enumerate(clips, 1):
         orig, src_in, src_out, d = c["_orig"], c["_in"], c["_out"], c["_used"]
         only_audio = audio_only(c)
+        # Перебивка без звука (sound = "нет"): видео без звукового клипа
+        # и без link — под ней играет рекордер (поверх речи) или музыка.
+        silent = (not only_audio) and c.get("sound") == "нет"
         vi = None
         key = track_key(c)
         start = c.get("pos")
@@ -547,12 +559,14 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
                 vi.append(_video_file_el(f"file-{i}v", c, orig, fps,
                                          width, height))
 
-            # link video<->audio
-            link = ET.SubElement(vi, "link")
-            ET.SubElement(link, "linkclipref").text = f"clipitem-audio-{i}"
-            ET.SubElement(link, "mediatype").text = "video"
-            ET.SubElement(link, "trackindex").text = "1"
-            ET.SubElement(link, "clipindex").text = "1"
+            # link video<->audio; у беззвучной перебивки звукового клипа
+            # нет, и висячая ссылка на clipitem-audio-i недопустима
+            if not silent:
+                link = ET.SubElement(vi, "link")
+                ET.SubElement(link, "linkclipref").text = f"clipitem-audio-{i}"
+                ET.SubElement(link, "mediatype").text = "video"
+                ET.SubElement(link, "trackindex").text = "1"
+                ET.SubElement(link, "clipindex").text = "1"
 
             # Комментарий с планом и причиной склейки. По схеме FCP7 lognote
             # лежит внутри logginginfo: напрямую в clipitem такого элемента
@@ -571,54 +585,57 @@ def build_fcp7(clips: List[Dict], fps: int = None, width: int = None,
                 seq_markers.append((start, c))
 
         # audio clipitem: звук либо из видеофайла, либо из отдельного
-        # микрофона (колонка audio из interview.py) — тогда в A1 сразу чистый звук
-        atrack = atracks[aname_of(c)]
-        ai = ET.SubElement(atrack, "clipitem", id=f"clipitem-audio-{i}")
-        if c.get("audio"):
-            aname = Path(c["audio"]).name
-            aabspath = c["audio"]
-            if not Path(aabspath).is_absolute():
-                aabspath = str(media_dir_global / aabspath)
-        else:
-            aname, aabspath = c["file"], c["abspath"]
-        ET.SubElement(ai, "name").text = aname
-        ET.SubElement(ai, "enabled").text = "TRUE"
-        ET.SubElement(ai, "duration").text = str(d)
-        ai.append(_rate_el(fps))
-        ET.SubElement(ai, "start").text = str(start)
-        ET.SubElement(ai, "end").text = str(end)
-
-        # У рекордера свои края: исходный REC длиннее камерного куска,
-        # и камерный in/out в нём означал бы другое место. Длительность
-        # на таймлайне равна видео, поэтому out = in + d: округление
-        # до кадров не должно развести звук и картинку.
-        a_in = c.get("audio_in")
-        a_dur = c.get("audio_duration")
-        if a_in is not None:
-            a_in_f = frames0(a_in, fps)
-            a_out_f = a_in_f + d
-            if a_dur and a_dur > 0:
-                a_orig_f = frames(a_dur, fps)
+        # микрофона (колонка audio из interview.py) — тогда в A1 сразу чистый звук.
+        # Беззвучная перебивка звукового клипа не создаёт вовсе: под ней
+        # играет рекордер или музыка.
+        if not silent:
+            atrack = atracks[aname_of(c)]
+            ai = ET.SubElement(atrack, "clipitem", id=f"clipitem-audio-{i}")
+            if c.get("audio"):
+                aname = Path(c["audio"]).name
+                aabspath = c["audio"]
+                if not Path(aabspath).is_absolute():
+                    aabspath = str(media_dir_global / aabspath)
             else:
-                a_orig_f = a_out_f
-            a_orig_f = max(a_orig_f, a_out_f)
-        else:
-            a_in_f, a_out_f = src_in, src_out
-            a_orig_f = max(orig, src_out)
+                aname, aabspath = c["file"], c["abspath"]
+            ET.SubElement(ai, "name").text = aname
+            ET.SubElement(ai, "enabled").text = "TRUE"
+            ET.SubElement(ai, "duration").text = str(d)
+            ai.append(_rate_el(fps))
+            ET.SubElement(ai, "start").text = str(start)
+            ET.SubElement(ai, "end").text = str(end)
 
-        ET.SubElement(ai, "in").text = str(a_in_f)
-        ET.SubElement(ai, "out").text = str(a_out_f)
-        ai.append(_audio_file_el(f"file-{i}a",
-                                 {"file": aname, "abspath": aabspath},
-                                 a_orig_f, fps))
-        ET.SubElement(ai, "sourcetrack").append(_audio_track_el())
-        if vi is not None:
-            link2 = ET.SubElement(ai, "link")
-            ET.SubElement(link2, "linkclipref").text = f"clipitem-video-{i}"
-            ET.SubElement(link2, "mediatype").text = "audio"
-            # индекс ЗВУКОВОЙ дорожки: у раздельных микрофонов он не всегда 1
-            ET.SubElement(link2, "trackindex").text = str(aindex[aname_of(c)])
-            ET.SubElement(link2, "clipindex").text = "1"
+            # У рекордера свои края: исходный REC длиннее камерного куска,
+            # и камерный in/out в нём означал бы другое место. Длительность
+            # на таймлайне равна видео, поэтому out = in + d: округление
+            # до кадров не должно развести звук и картинку.
+            a_in = c.get("audio_in")
+            a_dur = c.get("audio_duration")
+            if a_in is not None:
+                a_in_f = frames0(a_in, fps)
+                a_out_f = a_in_f + d
+                if a_dur and a_dur > 0:
+                    a_orig_f = frames(a_dur, fps)
+                else:
+                    a_orig_f = a_out_f
+                a_orig_f = max(a_orig_f, a_out_f)
+            else:
+                a_in_f, a_out_f = src_in, src_out
+                a_orig_f = max(orig, src_out)
+
+            ET.SubElement(ai, "in").text = str(a_in_f)
+            ET.SubElement(ai, "out").text = str(a_out_f)
+            ai.append(_audio_file_el(f"file-{i}a",
+                                     {"file": aname, "abspath": aabspath},
+                                     a_orig_f, fps))
+            ET.SubElement(ai, "sourcetrack").append(_audio_track_el())
+            if vi is not None:
+                link2 = ET.SubElement(ai, "link")
+                ET.SubElement(link2, "linkclipref").text = f"clipitem-video-{i}"
+                ET.SubElement(link2, "mediatype").text = "audio"
+                # индекс ЗВУКОВОЙ дорожки: у раздельных микрофонов он не всегда 1
+                ET.SubElement(link2, "trackindex").text = str(aindex[aname_of(c)])
+                ET.SubElement(link2, "clipindex").text = "1"
 
     # Длительность секвенции — конец самой длинной дорожки, а не сумма
     # всех клипов: с раздельными таймлайнами сумма больше длительности.

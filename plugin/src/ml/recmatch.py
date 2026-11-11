@@ -126,3 +126,22 @@ def find(cam_words, rec_index, min_quality: float = MIN_QUALITY):
     if best[2] < min_quality:
         return None, None, 0.0
     return best
+
+
+def rank(cam_words, rec_index, min_quality: float = MIN_QUALITY):
+    """Все файлы рекордера, подходящие куску камеры, по убыванию качества.
+
+    Слова не умеют различать дубли: текст один, файлы разные. Поэтому
+    вместо одного победителя возвращаем весь список — проверяющий
+    (огибающая в digest) выберет из него по звуку.
+
+    Возвращает [(имя файла, offset, quality)], quality >= min_quality.
+    """
+    out = []
+    for name, words in rec_index.items():
+        off, q = match(cam_words, words)
+        if off is None or q < min_quality:
+            continue
+        out.append((name, off, q))
+    out.sort(key=lambda hit: hit[2], reverse=True)
+    return out

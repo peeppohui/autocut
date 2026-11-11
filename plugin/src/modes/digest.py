@@ -13,9 +13,11 @@
 * **интервью** — разные люди, по файлу на человека. Из каждого берём
   один ответ секунд на 15, средний план (стандарт, слайд 12).
 
-Синхронизация не нужна нигде: части независимы, каждая приносит свой
-звук в своей дорожке. Это отличает дайджест от интервью с двумя
-камерами, где микрофоны стартуют в разное время.
+Звук на все части один — рекордер. Слова (Whisper) дают кандидатов и
+якорь сдвига, но одинаковый текст есть у всех дублей: словесный матч
+промахивался по дублю (рассинхрон в готовом ролике). Поэтому пару
+камера/рекордер проверяет огибающая звука (ml/sync): сдвиг принимается
+только когда звук совпадает, а не когда совпали слова.
 
 Порядок в секвенции: стендап -> нарезка -> интервью. Сначала ведущий
 объясняет, что сейчас будет, потом показываем, потом даём голос
@@ -43,6 +45,7 @@ import speech               # noqa: E402
 from ml import describe      # noqa: E402
 from ml import sorter       # noqa: E402
 from ml import recmatch
+from ml import sync
 from ml import theme
 from modes import recsound        # noqa: E402
 
@@ -596,7 +599,7 @@ def write_plan(rows, out_csv: Path, base: Path):
         w = csv.writer(f)
         w.writerow(["n", "file", "part", "path", "in", "out", "duration",
                     "desc", "track", "pos", "audio", "audio_in", "audio_out",
-                    "audio_duration", "audio_track"])
+                    "audio_duration", "audio_track", "sound"])
         for i, row in enumerate(rows, 1):
             part, path, src_in, src_out, desc = row[:5]
             track = row[5] if len(row) > 5 else ""
@@ -612,6 +615,15 @@ def write_plan(rows, out_csv: Path, base: Path):
                 audio_path = str(audio or "")
                 audio_in = audio_out = audio_duration = ""
                 audio_track = ""
+            # Колонка sound: "нет" — клип выкладывается без звукового
+            # клипа вовсе (перебивки поверх речи и в паузах: звук там
+            # несёт рекордер или музыка, а не шум зала вырезки).
+            sound = "нет" if audio == "нет" else ""
+            if sound:
+                # Маркер в audio не пролезает: premiere.py по пустой
+                # audio решает, что звук из видеофайла, а по sound=нет
+                # вообще не создаёт звуковой клип.
+                audio_path = ""
             try:
                 rel = path.resolve().relative_to(base.resolve()).as_posix()
             except Exception:
@@ -644,7 +656,7 @@ def write_plan(rows, out_csv: Path, base: Path):
                         "{:.4f}".format(src_out - src_in), desc, track,
                         ("{:.4f}".format(pos) if pos != "" else ""), arel,
                         fmt_num(audio_in), fmt_num(audio_out),
-                        fmt_num(audio_duration), audio_track])
+                        fmt_num(audio_duration), audio_track, sound])
     return out_csv
 
 
@@ -661,10 +673,19 @@ SHARE_BROLL = 0.55
 # и монтажёр гасит V1, чтобы посмотреть, что под голосом.
 VOICE_TRACK = "V1"
 BROLL_TRACK = "V2"
-# Пауза между блоками голоса. В эталоне 3.6 с после стендапа и 13 с
-# между спикерами, но там рабочий таймлайн на 444 с; у нас потолок
-# 120 с, поэтому пауза короче, а промежуток занимает нарезка.
-VOICE_GAP = 2.0
+# Музыкальная подложка живёт на своей дорожке A3: звук без картинки.
+# Она идёт от нуля до конца голосовой части и задаёт ритм перебивкам.
+MUSIC_TRACK = "A3"
+# Паузы эталона: 3.6 с после стендапа, 13 с между спикерами. В паузах
+# нарезка без звука — вместо болтовни зала звучит музыка.
+GAP_AFTER_STANDUP = 3.6
+GAP_BETWEEN_SPEAKERS = 13.0
+# Первый бролл заходит под конец стендапа на 2.2 с (J-cut): в эталоне
+# вход на 21.48 при стендапе до 23.68. Перекрывать сам стендап нельзя.
+J_CUT = 2.2
+# Первые секунды спикера открыты — первую реплику не перекрывать,
+# зритель должен увидеть, кто говорит. Перебивки со второй реплики.
+OVR_OPEN = 8.0
 # Порог «тот же сюжет». Фон сходства описаний нарезки: медиана 0.872,
 # p95 0.929, p99 0.950. Ниже фона отсекается всё подряд.
 SAME_SCENE = 0.95
@@ -675,7 +696,7 @@ BROLL_MEASURES = (1.2, 1.55, 1.9, 2.25, 2.6)
 
 
 def build_digest(standup, broll, interviews, labels, weights, log,
-                 target, neural=True, rec=None):
+                 target, neural=True, rec=None, music=None):
     """Рыба дайджеста по эталонному проекту.
 
     **Два слоя.** В эталоне («дайджест домашка») голос лежит на V1, а
@@ -722,6 +743,108 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         if msg not in rec_notes:
             rec_notes.add(msg)
             log("  Рекордер: " + msg)
+
+    # ---- проверка сдвига рекордера по звуку ----
+    # Слова дают кандидатов и якорь сдвига, но у дублей текст один и
+    # тот же: словесный матч уводил звук в чужой дубль (рассинхрон в
+    # готовом ролике). Звук дубли различает: на верном сдвиге огибающая
+    # камеры совпадает с огибающей рекордера, на чужом — нет.
+    work_dir = (rec or {}).get("work")
+    _env_cache = {}
+    _sync_cache = {}
+
+    def env_of(src):
+        """Огибающая звука файла: (env, rate), кэш по пути.
+
+        Через временный mono-16k WAV: оригинал не трогаем, а ffmpeg
+        гоняем один раз на файл.
+        """
+        key = str(src)
+        if key not in _env_cache:
+            wav = Path(work_dir) / ("wav_" + hashlib.md5(
+                key.encode("utf-8")).hexdigest()[:12] + ".wav")
+            if not wav.exists():
+                sync.to_mono16k(src, wav)
+            env, rate = sync.envelope(sync.read_wav(wav))
+            _env_cache[key] = (env, rate)
+        return _env_cache[key]
+
+    def wave_pair(path, rec_src, delta_w, c0):
+        """Сдвиг рекордера по звуку против словесного якоря.
+
+        `delta_w` — сдвиг от слов; окно рекордера ищем рядом с ним,
+        иначе поиск по всему файлу ловит ложные пики на далёком крае
+        (правило AGENTS: широкое окно рождает фантомные совпадения).
+        Возвращает (delta, quality, contrast) или (None, 0.0, 0.0);
+        delta такой, что время_рекордера = время_камеры + delta.
+        """
+        try:
+            cenv, rate = env_of(path)
+            renv, _rr = env_of(rec_src)
+        except Exception as e:
+            rec_note("звук не читается: {}".format(str(e)[:80]))
+            return None, 0.0, 0.0
+        cam_len = len(cenv) / rate
+        rec_len = len(renv) / rate
+        c0 = min(max(0.0, c0), max(0.0, cam_len - 8.0))
+        r0 = c0 + float(delta_w or 0.0)
+        r0 = min(max(0.0, r0), max(0.0, rec_len - 8.0))
+        n = min(110.0, cam_len - c0, rec_len - r0)
+        if n < 8.0:
+            return None, 0.0, 0.0
+        ci, ri, ni = int(c0 * rate), int(r0 * rate), int(n * rate)
+        try:
+            off, q, co = sync.find_offset(renv[ri:ri + ni], cenv[ci:ci + ni],
+                                          rate=rate, max_lag=25.0)
+        except Exception as e:
+            rec_note("сверка звука не удалась: {}".format(str(e)[:80]))
+            return None, 0.0, 0.0
+        # find_offset вернул (0,0,0) — общего сигнала в окне нет
+        if q == 0.0 and co == 0.0:
+            return None, 0.0, 0.0
+        # Слабый и не острый пик верить не может: правило доверия sync.
+        if q < sync.TRUST_QUALITY and co < sync.TRUST_CONTRAST:
+            return None, q, co
+        # Окно референса начинается на r0, окна камеры — на c0, поэтому
+        # найденный сдвиг off считается от этих начал: пересчёт в
+        # сдвиг целых файлов — off + r0 - c0.
+        return off + r0 - c0, q, co
+
+    def sync_hit(path, words, c0=0.0):
+        """Проверенный звуком сдвиг рекордера для файла камеры.
+
+        Слова дают список кандидатов — у дублей текст один, и выбрать
+        по словам нельзя. Каждый кандидат проверяется огибающей: свой
+        дубль совпадает по звуку, чужой — нет. Пары считаем один раз
+        (сдвиг на файле константен, замер эталона: один Δ на весь кусок).
+
+        Возвращает (имя, сдвиг, качество) или (None, None, 0.0).
+        """
+        if not rec_index or not work_dir or not words:
+            return None, None, 0.0
+        best = None
+        for name, off_w, q_words in recmatch.rank(words, rec_index):
+            src = rec_sources.get(str(name).upper())
+            if src is None:
+                continue
+            key = (Path(path).name, src.name)
+            if key not in _sync_cache:
+                hit = wave_pair(path, src, off_w, c0)
+                _sync_cache[key] = hit
+                if hit[0] is not None:
+                    log("  Синхрон: {} <-> {} Δ={:.2f}с (звук q={:.2f}, "
+                        "контраст {:.1f}, слова {:.2f})".format(
+                            Path(path).name, src.name, hit[0],
+                            hit[1], hit[2], q_words))
+            else:
+                hit = _sync_cache[key]
+            if hit[0] is None:
+                continue
+            if best is None or (hit[1], hit[2]) > (best[2], best[3]):
+                best = (name, hit[0], hit[1], hit[2])
+        if best is None:
+            return None, None, 0.0
+        return best[0], best[1], best[2]
 
     def voice_audio(path, i, o, chunk, hit=None):
         """Звук с рекордера для голосового куска: словарь или пусто.
@@ -868,7 +991,9 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         if key:
             used_themes.add(key)
         nar_spent[0] += b - a
-        return ("нарезка", path, a, b, text[:140], BROLL_TRACK, pos)
+        # "нет" в конце — перебивка выкладывается без звукового клипа:
+        # под ней играет рекордер (поверх речи) или музыка (паузы).
+        return ("нарезка", path, a, b, text[:140], BROLL_TRACK, pos, "нет")
 
     def pick_for(text, limit):
         """Клипы под тему текста: по описанию кадра и по его звуку."""
@@ -909,39 +1034,41 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     t = 0.0
     voice = []           # (начало, конец, текст реплики)
     spoken = []          # весь голос, включая стендап
+    slots = []           # слоты нарезки: (начало, конец, тема, добор-хвостом)
     standup_text = ""
     for path, i, o, text, chunk in standup:
         if (o - i) > st_budget and rows:
             break
         d = qf(o - i)
+        hit = sync_hit(path, chunk, i)
         rows.append(("стендап", path, i, i + d, text[:200], VOICE_TRACK, t,
-                     voice_audio(path, i, i + d, chunk)))
+                     voice_audio(path, i, i + d, chunk, hit)))
         spoken.append((t, t + d, text))
         standup_text += " " + text
         t += d
-    t += qf(VOICE_GAP)
+    standup_end = t
+    t += qf(GAP_AFTER_STANDUP)
     for n, (path, pieces, words) in enumerate(interviews):
         if n:
-            t += VOICE_GAP
+            t += qf(GAP_BETWEEN_SPEAKERS)
         # Звук с рекордера ищем ОДИН РАЗ на спикера, а не на каждый
         # кусок: короткий кусок в два-три слова рекордеру не
-        # соответствует, и звук терялся у половины кусков. Ответ
-        # рекордера один на весь ответ спикера — так и в эталоне.
-        # Сопоставляем по ВЫБРАННЫМ ответам, а не по началу файла:
-        # файл интервью начинается с вопроса ведущего, а в рекордере
-        # вопрос сформулирован иначе и якорь не срабатывает. Ответы
-        # же — те же слова, и по ним совпадение точное (замер: 0.62).
+        # соответствует, и звук терялся у половины кусков. Сопоставляем
+        # по ВЫБРАННЫМ ответам, а не по началу файла: в рекордере вопрос
+        # ведущего сформулирован иначе и якорь по нему не срабатывает.
         ans_words = [w for piece in pieces for w in piece[3]]
-        rec_hit = recmatch.find(ans_words, rec_index) if (rec_index and ans_words) \
-            else (None, None, 0.0)
-        if rec_index and ans_words:
-            if rec_hit[0] is None:
-                log("  Интервью: рекордер не совпал для {}"
-                    .format(Path(path).name))
-            else:
-                log("  Интервью: {} (сдвиг {:.2f}с, качество {:.2f})".format(
-                    rec_hit[0], rec_hit[1], rec_hit[2]))
+        rec_hit = sync_hit(path, ans_words, pieces[0][0] if pieces else 0.0)
+        if rec_index and rec_hit[0] is None:
+            # Спикер без звуковой пары с рекордером не берётся: без
+            # сдвига куски играют чужим или камерным звуком — тот самый
+            # «набор каких-то звуков» из фидбэка. В эталоне у такого
+            # соседа-дубля записи в рекордере просто нет.
+            log("  Интервью: {} не сведён с рекордером — не берём"
+                .format(Path(path).name))
+            continue
         left = iv_budget
+        spk_t0 = t
+        spans = []          # куски спикера на таймлайне
         for i, o, text, chunk in pieces:
             d = qf(o - i)
             if left <= 0 or (t + d) > target:
@@ -950,61 +1077,52 @@ def build_digest(standup, broll, interviews, labels, weights, log,
                          voice_audio(path, i, i + d, chunk, rec_hit)))
             voice.append((t, t + d, text))
             spoken.append((t, t + d, text))
+            spans.append((t, t + d, text))
             t += d
             left -= d
+        # Слоты перебивок поверх реплик. Первые OVR_OPEN секунд спикера
+        # открыты: зритель должен увидеть, кто говорит, — первую реплику
+        # не перекрываем (в эталоне спикер открыт ~8 с).
+        for pt0, pt1, text in spans:
+            s0 = max(pt0, spk_t0 + OVR_OPEN)
+            if pt1 - s0 >= 1.0:
+                slots.append((s0, pt1, text, False))
     voice_end = t
+
+    if music is not None and voice_end > 0.5:
+        # Музыкальная подложка эталона: от нуля до конца голосовой
+        # части, одной строкой, на своей дорожке A3. Она же задаёт
+        # ритм, по которому ставятся перебивки.
+        rows.append(("музыка", music, 0.0, voice_end, "музыкальная подложка",
+                     MUSIC_TRACK, 0.0, str(music)))
 
     # ---- слой 2: нарезка ----
     # Подбор ТОЛЬКО по теме. Никакого «просто остальные клипы подряд»:
     # в эталоне такого нет, а монтажёр такое видит как «монтаж не сделан».
     #
-    # Поверх голоса — короткая вырезка по теме реплики: монтажёр гасит
-    # V1 и видит, что под голосом. Кусок не длиннее меры и не вылезает
-    # за конец реплики: иначе он налезает на следующий кусок нарезки
-    # (в живом прогоне C0062 вылезал поверх C0069 на 1.2 с).
-    measure_i = 0
-    for start, end, text in voice:
-        if nar_spent[0] >= nar_budget:
-            break
-        slot = end - start
-        if slot < BROLL_MEASURES[0]:
-            continue
-        for seg in pick_for(text, 1):
-            limit = min(mq[measure_i % len(mq)],
-                        max(1, int(slot * fps + 1e-6))) / fps
-            measure_i += 1
-            rows.append(take_broll(seg, start, limit=limit))
+    # Перебивки идут БЕЗ СВОЕГО ЗВУКА (sound = "нет"): поверх речи
+    # звучит рекордер, в паузах и хвосте — музыка. Со своим звуком из
+    # видеофайла они заглушали интервью — жалоба на прошлую сборку.
+
+    # J-cut: первый бролл заходит под конец стендапа (в эталоне вход
+    # за 2.2 с при стендапе до 23.68). Один кусок, без звука: кадр уже
+    # идёт, когда голос стендапа ещё звучит.
+    if standup and nar_spent[0] < nar_budget and standup_end > J_CUT + 0.5:
+        for seg in pick_for(standup_text.strip(), 1):
+            rows.append(take_broll(seg, standup_end - J_CUT, limit=J_CUT))
             break
 
-    # В паузах голоса — продолжение темы: берём нарезку по словам
-    # последней сказанной реплики. Меры те же, пауза ограничивает
-    # кусок сверху.
-    gaps = []
+    # Паузы между блоками голоса — продолжение темы: берём нарезку по
+    # словам последней сказанной реплики. Меры те же, пауза ограничивает
+    # кусок сверху. В эталоне паузы заполнены всегда: чёрная дыра на
+    # V1/V2 выдавала бы недоделанный монтаж.
     prev = 0.0
     last_text = standup_text.strip()
     for start, end, text in sorted(spoken):
         if start - prev > 0.5:
-            gaps.append((prev, start, last_text))
+            slots.append((prev, start, last_text, False))
         prev = end
         last_text = text
-    measure_i = 0
-    for start, end, theme_text in gaps:
-        pos = start
-        while pos < end - 0.5 and nar_spent[0] < nar_budget:
-            seg = None
-            for cand in pick_for(theme_text, 1):
-                seg = cand
-                break
-            if seg is None:
-                break
-            limit = min(mq[measure_i % len(mq)],
-                        max(1, int((end - pos) * fps + 1e-6))) / fps
-            measure_i += 1
-            if limit < 1.0:
-                break
-            row = take_broll(seg, pos, limit=limit)
-            rows.append(row)
-            pos += row[3] - row[2]
 
     # Хвост после голоса — вырезки той же меры 1.2-2.6 с, что и
     # остальная нарезка. Целые клипы отменены: реальные куски выходили
@@ -1033,25 +1151,32 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         return None
 
     tail_theme = (voice[-1][2] if voice else standup_text) or standup_text
-    pos = voice_end
+    if target - voice_end >= 1.0:
+        slots.append((voice_end, target, tail_theme, True))
+
+    # Раскладка слотов по таймлайну: сначала ранние (J-cut уже стоит),
+    # паузы и хвост получают бюджет раньше далёких оверлеев.
+    slots.sort(key=lambda s: s[0])
     measure_i = 0
-    while nar_spent[0] < nar_budget and pos < target - 1.0:
-        seg = None
-        for cand in pick_for(tail_theme, 1):
-            seg = cand
-            break
-        if seg is None:
-            seg = leftover_cand()
-        if seg is None:
-            break
-        limit = min(mq[measure_i % len(mq)],
-                    max(1, int((target - pos) * fps + 1e-6))) / fps
-        measure_i += 1
-        if limit < 1.0:
-            break
-        row = take_broll(seg, pos, limit=limit)
-        rows.append(row)
-        pos += row[3] - row[2]
+    for start, end, theme_text, allow_leftover in slots:
+        pos = start
+        while pos < end - 0.5 and nar_spent[0] < nar_budget:
+            seg = None
+            for cand in pick_for(theme_text, 1):
+                seg = cand
+                break
+            if seg is None and allow_leftover:
+                seg = leftover_cand()
+            if seg is None:
+                break
+            limit = min(mq[measure_i % len(mq)],
+                        max(1, int((end - pos) * fps + 1e-6))) / fps
+            measure_i += 1
+            if limit < 1.0:
+                break
+            row = take_broll(seg, pos, limit=limit)
+            rows.append(row)
+            pos += row[3] - row[2]
     return rows
 
 
@@ -1244,8 +1369,33 @@ def main(argv=None) -> int:
     # rec_index и нарезка ещё пользуются моделью.
     speech.release()
 
+    # Музыкальная подложка: в эталоне mp3 лежит рядом с материалом и
+    # идёт от нуля до конца голосовой части. Сначала пробуем настройку
+    # digest.music, затем любой mp3 в корне папки материала.
+    music_name = str(cfg("music", "") or "")
+    music = None
+    if music_name:
+        mp = Path(music_name)
+        if not mp.is_absolute():
+            mp = base / mp
+        if mp.exists():
+            music = mp
+        else:
+            log("Музыка: {} не найдена".format(music_name))
+    if music is None:
+        try:
+            mp3s = sorted(base.glob("*.mp3"))
+        except OSError:
+            mp3s = []
+        if mp3s:
+            music = mp3s[0]
+    if music is not None:
+        log("Музыка: {}".format(music.name))
+    else:
+        log("Музыка: mp3 в корне материала нет — идём без подложки")
+
     rows = build_digest(front, broll, back, labels, weights, log, target,
-                        rec=rec)
+                        rec=rec, music=music)
 
     if not rows:
         print("Собрать нечего: все три части пустые.")
@@ -1260,11 +1410,12 @@ def main(argv=None) -> int:
     span = max(r[6] + (r[3] - r[2]) for r in rows)
     log("\nПлан: " + str(plan))
     log("Полка для монтажёра: " + str(shelf))
-    log("Кусов: {} (стендап {}, нарезка {}, интервью {})".format(
+    log("Кусов: {} (стендап {}, нарезка {}, интервью {}, музыка {})".format(
         len(rows),
         len([r for r in rows if r[0] == "стендап"]),
         len([r for r in rows if r[0] == "нарезка"]),
-        len([r for r in rows if r[0] == "интервью"])))
+        len([r for r in rows if r[0] == "интервью"]),
+        len([r for r in rows if r[0] == "музыка"])))
     log("Хронометраж: {:.1f}с (потолок {:.0f}с)".format(span, target))
     if span > target:
         log("  ПРЕВЫШЕНИЕ на {:.1f}с".format(span - target))

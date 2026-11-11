@@ -17,9 +17,12 @@
 import sys
 import csv
 import io
+import wave
 import contextlib
 import tempfile
 from pathlib import Path as _P
+
+import numpy as np
 
 ROOT = _P(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -328,6 +331,70 @@ for a, b in zip(_nar4, _nar4[1:]):
 ok("соседние номера не идут подряд и в новой сборке", _ok4,
    str([r[1].name for r in _nar4[:8]]))
 
+# --- перебивки без звука, J-cut, паузы эталона, музыка ---
+# В эталоне перебивки играют БЕЗ своего звука: поверх речи звучит
+# рекордер, в паузах — музыка. Колонка sound=нет выкидывает звуковой
+# клип перебивки из XML совсем.
+ok("нарезка без своего звука",
+   all(r[7] == "нет" for r in _nar4),
+   str(set(r[7] for r in _nar4)))
+
+ok("гэп после стендапа — 3.6 с, как в эталоне",
+   abs(next(r[6] for r in _rows if r[0] == "интервью") - 7.6) < 1e-9,
+   str([r[6] for r in _rows if r[0] == "интервью"]))
+
+# J-cut: первый бролл заходит под конец стендапа, кадр уже идёт, пока
+# звучит голос. Тема стендапа должна попадать в лейблы, поэтому у
+# стенда здесь текст «университет открывает двери».
+_stj = [(_P("C0102.MP4"), 0.0, 4.0, "университет открывает двери",
+         [("шесть", 0.0, 1.0), ("научных", 1.0, 2.0)])]
+_rowsj = DG.build_digest(_stj, _broll2, [], _labels2, _weights2, print, 120,
+                         neural=False)
+_narj = [r for r in _rowsj if r[0] == "нарезка"]
+ok("J-cut: бролл заходит под стендап",
+   bool(_narj) and _narj[0][6] < 4.0 and _narj[0][3] <= 4.0 + 1e-9
+   and "университет" in _narj[0][4],
+   str([(r[6], r[4][:20]) for r in _narj[:2]]))
+
+# Первые OVR_OPEN секунд спикера открыты: перекрывать можно только
+# реплики, начавшиеся позже (в эталоне спикер открыт ~8 с).
+_ivl = [(_P("C0098.MP4"),
+         [(0.0, 12.0, "лекция искусственный интеллект",
+           [("лекция", 0.0, 1.0), ("искусственный", 1.0, 2.0)])],
+         [("лекция", 0.0, 1.0), ("искусственный", 1.0, 2.0)])]
+_rowsl = DG.build_digest(_st, _broll2, _ivl, _labels2, _weights2, print, 120,
+                         neural=False)
+_spk0 = min(r[6] for r in _rowsl if r[0] == "интервью")
+_narl = [r for r in _rowsl if r[0] == "нарезка"]
+ok("первые 8 секунд спикера открыты",
+   all(not (_spk0 <= r[6] < _spk0 + 8.0) for r in _narl),
+   str(sorted(round(r[6], 2) for r in _narl)))
+ok("и перебивка поверх длинной реплики всё же стоит",
+   any(_spk0 + 8.0 <= r[6] < _spk0 + 12.0 for r in _narl),
+   str(sorted(round(r[6], 2) for r in _narl)))
+
+# Музыкальная подложка: одна строка, дорожка A3, от нуля до конца
+# голоса — так в эталоне.
+_rows7 = DG.build_digest(_st, _broll2, _iv, _labels2, _weights2, print, 120,
+                         neural=False, music=_P("mu.mp3"))
+_mus = [r for r in _rows7 if r[0] == "музыка"]
+_ve7 = max([r[6] + (r[3] - r[2]) for r in _rows7
+            if r[0] in ("стендап", "интервью")] or [0])
+ok("музыка идёт от нуля до конца голоса на A3",
+   bool(_mus) and _mus[0][5] == "A3" and _mus[0][2] == 0.0
+   and _mus[0][6] == 0.0 and abs(_mus[0][3] - _ve7) < 1e-9,
+   str([(r[2], r[3], r[5]) for r in _mus]))
+
+# Спикер, не сведённый с рекордером (нет ни словесного совпадения, ни
+# звуковой пары), не берётся: без сдвига куски играют чужим звуком.
+_rows9 = DG.build_digest(_st, _broll2, _iv, _labels2, _weights2, print, 120,
+                         neural=False,
+                         rec={"index": {"R1": [("несовпадающее", 0.0, 1.0)]},
+                              "dir": None, "work": None})
+ok("спикер без синхрона с рекордером не берётся",
+   "интервью" not in [r[0] for r in _rows9],
+   str([r[0] for r in _rows9]))
+
 # одна тема — один кадр
 _dup = [_seg2("C0020.MP4", "общий", "зрители", "одна и та же тема"),
         _seg2("C0040.MP4", "общий", "зрители", "одна и та же тема"),
@@ -483,25 +550,69 @@ ok("длительность исходника и дорожка A2",
    _arow["audio_duration"] == "60.0000" and _arow["audio_track"] == "A2",
    str((_arow["audio_duration"], _arow["audio_track"])))
 
+# --- колонка sound в плане ---
+# "нет" у перебивки: premiere.py по ней выкидывает звуковой клип из XML.
+# У строки с настоящим звуком колонка пустая — иначе полка поломается.
+DG.write_plan([("нарезка", mov, 0.0, 10.0, "текст", "V2", 0.0, "нет")],
+              tmp / "plan_sound.csv", tmp)
+_srow = next(csv.DictReader((tmp / "plan_sound.csv").open(encoding="utf-8")))
+ok("звуко-нет помечается в плане",
+   _srow["sound"] == "нет" and _srow["audio"] == "",
+   str((_srow["sound"], _srow["audio"])))
+ok("у звуковой строки sound пустой",
+   _arow["sound"] == "", _arow["sound"])
+
 # build_digest должен вернуть исходник и его края, а не готовый WAV.
-_old_find = DG.recmatch.find
+# Пара камера/рекордер теперь проверяется ещё и огибающей, поэтому звук
+# в фейке настоящий: один и тот же шумовой паттерн, в рекордере он
+# начинается на 6.2 с позже. Слова дают якорь сдвига, звук подтверждает
+# его и выбирает файл.
 _old_dur = DG.recsound.probe_duration
-DG.recmatch.find = lambda _words, _index: ("REC00016", 6.2, 0.9)
 DG.recsound.probe_duration = lambda _path: 60.0
 try:
+    _words = [("шаг", float(_k) * 0.9, float(_k) * 0.9 + 0.8)
+              for _k in range(4)]
+    _rec_words = [("шаг", 6.2 + float(_k) * 0.9, 6.2 + float(_k) * 0.9 + 0.8)
+                  for _k in range(4)]
+    _sr = 16000
+    _rng = np.random.default_rng(7)
+    _pat = np.zeros(int(_sr * 8.0))
+    for _k in range(12):
+        _a = int(_sr * 0.06)
+        _s = int(_k * 0.55 * _sr)
+        _pat[_s:_s + _a] = 1.0 + 0.7 * abs(np.sin(_k * 1.3))
+    _cam_sig = _rng.standard_normal(len(_pat)) * _pat
+    _shift = int(6.2 * _sr)
+    _rec_sig = np.zeros(len(_cam_sig) + _shift)
+    _rec_sig[_shift:_shift + len(_cam_sig)] = _cam_sig
+
+    def _write_wav(path, sig):
+        with wave.open(str(path), "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(_sr)
+            f.writeframes((np.clip(sig, -1.0, 1.0) * 32767)
+                          .astype(np.int16).tobytes())
+
+    (tmp / "work").mkdir(exist_ok=True)
+    _write_wav(rec, _rec_sig)
+    _cam_wav = tmp / "cam.wav"
+    _write_wav(_cam_wav, _cam_sig)
     _rec_rows = DG.build_digest(
-        [(mov, 0.0, 4.0, "текст", [("слово", 0.0, 1.0)])],
+        [(_cam_wav, 0.0, 4.0, "текст", _words)],
         [], [], {}, {}, print, 100, neural=False,
-        rec={"index": {"REC00016": [("слово", 0.0, 1.0)]},
+        rec={"index": {"REC00016": _rec_words},
              "dir": rec_dir, "work": tmp / "work"})
 finally:
-    DG.recmatch.find = _old_find
     DG.recsound.probe_duration = _old_dur
 _ra = _rec_rows[0][7] if _rec_rows else ""
+# Огибающая считается с шагом 0.02с (полкадра на 25 fps): сдвиг
+# приходит с её точностью, а не до микрона. Жёсткое равенство делало
+# бы тест заложником округления сетки.
 ok("сборка отдаёт исходный REC и его in/out",
    isinstance(_ra, dict) and _ra.get("path") == str(rec)
-   and abs(_ra.get("in", 0) - 6.2) < 1e-9
-   and abs(_ra.get("out", 0) - 10.2) < 1e-9
+   and abs(_ra.get("in", 0) - 6.2) < 0.05
+   and abs(_ra.get("out", 0) - 10.2) < 0.05
    and _ra.get("track") == "A2", str(_ra))
 
 # --- кеш распознавания экономит повторный прогон ---
