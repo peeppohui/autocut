@@ -424,11 +424,12 @@ for _nm in ("C0001.MP4", "C0002.MP4", "C0003.MP4"):
 _old_dur = DG.clip_duration
 DG.clip_duration = lambda p: 10.0
 try:
+    # Исходники берём из папок частей: в корне проекта материала нет.
     _ob_rows = DG.otbor_rows(
         [("нарезка", _ob_base / "C0001.MP4", 0.0, 2.0, "текст", "V2", 0.0,
           "нет"),
          ("музыка", _ob_base / "m.mp3", 0.0, 5.0, "музыка", "A3", 0.0, "")],
-        _ob_base)
+        {"standup": None, "broll": _ob_base, "interview": None})
 finally:
     DG.clip_duration = _old_dur
 ok("отбор: взятого исходника в отборе нет",
@@ -440,6 +441,24 @@ ok("отбор: куски подряд, своя дорожка и свой з�
    and [r[6] for r in _ob_rows] == [0.0, 10.0]
    and [r[3] for r in _ob_rows] == [10.0, 10.0],
    str([(r[6], r[3], r[5], r[7]) for r in _ob_rows]))
+
+# Отбор берёт исходники из всех трёх папок частей и не трогает корень
+# проекта: там лежат чужие файлы (прежний ролик, сам проект).
+_ob_parts = {}
+for _key in ("standup", "broll", "interview"):
+    _d = _P(tempfile.mkdtemp())
+    (_d / ("S_" + _key + ".MP4")).write_bytes(b"0")
+    _ob_parts[_key] = _d
+_old_dur = DG.clip_duration
+DG.clip_duration = lambda p: 10.0
+try:
+    _ob_all = DG.otbor_rows([], _ob_parts)
+finally:
+    DG.clip_duration = _old_dur
+ok("отбор: исходники из всех папок частей",
+   sorted(r[1].name for r in _ob_all) == ["S_broll.MP4", "S_interview.MP4",
+                                           "S_standup.MP4"],
+   str([r[1].name for r in _ob_all]))
 
 # одна тема — один кадр
 _dup = [_seg2("C0020.MP4", "общий", "зрители", "одна и та же тема"),

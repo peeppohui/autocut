@@ -695,7 +695,7 @@ SAME_SCENE = 0.95
 BROLL_MEASURES = (1.2, 1.55, 1.9, 2.25, 2.6)
 
 
-def otbor_rows(rows, base: Path):
+def otbor_rows(rows, parts):
     """Не взятые в сборку исходники -> строки плана секвенции «Отбор».
 
     Монтажёр смотрит «Отбор», когда какой-то кадр в сборке не
@@ -703,23 +703,36 @@ def otbor_rows(rows, base: Path):
     из самого файла (клип без колонки audio занимает собственную
     звуковую дорожку). Куски идут подряд по именам файлов, без
     наложений. Музыку в «использованные» не считаем: mp3 — не исходник.
+
+    Исходники берём из папок частей (стендап/нарезка/интервью), а не из
+    корня проекта: материал лежит уровнем ниже (материал/исх/...), а в
+    корне валяются чужие файлы — прежний ролик и сам проект.
     """
     used = {Path(r[1]).name for r in rows if r[0] != "музыка"}
+    if isinstance(parts, dict):
+        folders = [parts.get(k) for k in ("standup", "broll", "interview")]
+    elif isinstance(parts, (list, tuple)):
+        folders = list(parts)
+    else:
+        folders = [parts]
     out = []
     pos = 0.0
-    for f in videos(base):
-        if f.name in used:
-            continue
-        dur = clip_duration(f)
-        if dur <= 0:
-            # Нет длительности — в Premiere такой клип не поставить,
-            # молча пропускать тоже плохо: пусть монтажёр увидит в
-            # журнале, что файл остался за бортом.
-            print("Отбор: не померена длина {}, в отбор не попал".format(f.name))
-            continue
-        out.append(("отбор", f, 0.0, dur, "просмотр: " + f.name, "V1",
-                    pos, ""))
-        pos += dur
+    seen = set()
+    for folder in folders:
+        for f in videos(folder):
+            if f.name in used or f.name in seen:
+                continue
+            seen.add(f.name)
+            dur = clip_duration(f)
+            if dur <= 0:
+                # Нет длительности — в Premiere такой клип не поставить,
+                # молча пропускать тоже плохо: пусть монтажёр увидит в
+                # журнале, что файл остался за бортом.
+                print("Отбор: не померена длина {}, в отбор не попал".format(f.name))
+                continue
+            out.append(("отбор", f, 0.0, dur, "просмотр: " + f.name, "V1",
+                        pos, ""))
+            pos += dur
     return out
 
 
@@ -1437,7 +1450,7 @@ def main(argv=None) -> int:
     plan = write_plan(rows, out_dir / "plan.csv", base)
     # Отбор — то, чего в сборке нет: монтажёр смотрит эти исходники,
     # когда какой-то кадр в сборке не понравился.
-    ot = otbor_rows(rows, base)
+    ot = otbor_rows(rows, parts)
     otbor = write_plan(ot, out_dir / "otbor.csv", base)
     shelf = write_shelf(broll, labels, plans, rows, out_dir / "shelf.csv")
     # Хронометраж — конец таймлайна (позиция + длительность последнего
