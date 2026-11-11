@@ -30,16 +30,22 @@ def material(folder: str) -> dict:
 
 
 def digest(folder: str, out: str, target_sec=None, model="large-v3") -> dict:
-    """Собрать дайджест: план, полка и XML для Premiere.
+    """Собрать дайджест: план, полка и две секвенции для Premiere.
 
-    Два шага: сначала план (долго, это и есть сборка), потом XML из
+    Три шага: сначала план (долго, это и есть сборка), потом XML из
     плана (быстро). Панель следит за задачей и импортирует XML, когда
     он готов.
+
+    Секвенций две: «Сбор» — собранный материал (рыба), «Отбор» —
+    не взятые в сборку исходники, чтобы монтажёр подменил кадры, если
+    какие-то не понравятся.
     """
     outp = Path(out)
     outp.mkdir(parents=True, exist_ok=True)
     plan = outp / "plan.csv"
+    otbor = outp / "otbor.csv"
     xml = outp / "ryba.xml"
+    xml_otbor = outp / "ryba_otbor.xml"
     edl = outp / "ryba.edl"
     argv = [str(SRC / "modes" / "digest.py"), "--input", str(folder),
             "--out", str(outp), "--model", model]
@@ -47,10 +53,17 @@ def digest(folder: str, out: str, target_sec=None, model="large-v3") -> dict:
         argv += ["--target-sec", str(target_sec)]
     steps = [
         ("собираю речь и нарезку", argv, str(plan)),
-        ("собираю XML для Premiere",
+        # Отбор идёт ПЕРЕД чистовиком: панель импортирует XML последнего
+        # шага, и им должен остаться ryba.xml — секвенция «Сбор».
+        ("собираю секвенцию «Отбор»",
+         [str(SRC / "io" / "premiere.py"), "--timeline", str(otbor),
+          "--media-dir", str(folder), "--out", str(xml_otbor), "--edl", "",
+          "--name", "Отбор", "--no-markers", "--allow-empty"],
+         str(xml_otbor)),
+        ("собираю секвенцию «Сбор»",
          [str(SRC / "io" / "premiere.py"), "--timeline", str(plan),
           "--media-dir", str(folder), "--out", str(xml), "--edl", str(edl),
-          "--name", "Дайджест"], str(xml)),
+          "--name", "Сбор"], str(xml)),
     ]
     task_id = jobs.RUNNER.start("дайджест", steps=steps)
     return {"ok": True, "задача": task_id, "папка": str(outp)}

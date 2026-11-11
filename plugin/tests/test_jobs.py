@@ -136,14 +136,22 @@ ok("дайджест ставится в общий Runner",
    res.get("задача") == "jX" and calls and calls[0][0] == "дайджест",
    str(res))
 steps = calls[0][2] if calls else []
-ok("дайджест — два шага", len(steps) == 2, str(steps))
+ok("дайджест — три шага", len(steps) == 3, str(steps))
 first = steps[0][1] if steps else []
 second = steps[1][1] if len(steps) > 1 else []
+last = steps[-1][1] if steps else []
 ok("хронометраж доходит до плана",
    "--target-sec" in first and "90" in first, str(first))
-ok("второй шаг собирает XML",
+ok("второй шаг собирает секвенцию отбора",
    any(name.endswith("premiere.py") for name in second)
-   and "--media-dir" in second, str(second))
+   and "Отбор" in second and "--allow-empty" in second, str(second))
+ok("последний шаг собирает XML рыбы",
+   any(name.endswith("premiere.py") for name in last)
+   and "--media-dir" in last and "Сбор" in last, str(last))
+# Панель импортирует XML последнего шага — им должен остаться
+# ryba.xml, то есть секвенция «Сбор».
+ok("последним шагом идёт сбор",
+   str(steps[-1][2]).endswith("ryba.xml"), str(steps[-1][2]))
 
 print()
 if fail:

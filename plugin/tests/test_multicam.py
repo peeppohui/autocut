@@ -308,6 +308,23 @@ with tempfile.TemporaryDirectory() as td:
     ok("XML с pos проходит check_xml",
        not premiere.check_xml(pos_xml), str(premiere.check_xml(pos_xml)))
 
+    # Пустой «Отбор» — не поломка: не взятых исходников может не
+    # оказаться. Основной таймлайн без клипов — по-прежнему ошибка.
+    _empty_csv = td / "empty.csv"
+    _empty_csv.write_text(
+        "n,file,part,path,in,out,duration,desc,track,pos,audio,"
+        "audio_in,audio_out,audio_duration,audio_track,sound\n",
+        encoding="utf-8")
+    _empty_xml = td / "empty.xml"
+    _rc = premiere.main(["--timeline", str(_empty_csv), "--out", str(_empty_xml),
+                         "--edl", "", "--name", "Отбор", "--no-markers",
+                         "--allow-empty"])
+    ok("пустой отбор не роняет сборку",
+       _rc == 0 and not _empty_xml.exists(), str((_rc, _empty_xml.exists())))
+    _rc2 = premiere.main(["--timeline", str(_empty_csv), "--out", str(_empty_xml),
+                          "--edl", "", "--name", "Сбор"])
+    ok("пустой основной таймлайн — ошибка", _rc2 == 1, str(_rc2))
+
 print()
 if fail:
     print(f"MULTICAM FAIL ({len(fail)}): {fail}")

@@ -654,6 +654,18 @@ function runDoctor() {
   });
 }
 
+// Импортируем несколько XML по очереди: секвенций две — «Сбор»
+// (рыба) и «Отбор» (не взятые исходники). Порядок не важен, но
+// список собираем в порядке шагов задачи.
+function importXmlList(paths, i, cb) {
+  if (!paths.length || i >= paths.length) { cb(true); return; }
+  var xml = paths[i];
+  importXml(xml, function (res) {
+    if (String(res).indexOf("OK|") !== 0) { cb(false); return; }
+    importXmlList(paths, i + 1, cb);
+  });
+}
+
 function watchTask() {
   if (TIMER) { clearTimeout(TIMER); }
   if (!TASK) { return; }
@@ -672,11 +684,17 @@ function watchTask() {
     if (st === "готово") {
       TASK = "";
       setDot(true, "готово, импортирую в проект");
+      // Все XML из результатов шагов: и «Сбор», и «Отбор».
+      var xmls = [];
+      ((t.результаты || []).forEach(function (r) {
+        var p = r.результат || "";
+        if (p && /\.xml$/i.test(p) && xmls.indexOf(p) < 0) { xmls.push(p); }
+      }));
       var xml = (t.результат && t.результат.xml) || "";
-      if (!xml) { log("XML не указан", "err"); return; }
-      importXml(xml, function (res) {
-        setDot(String(res).indexOf("OK|") === 0, String(res).indexOf("OK|") === 0
-          ? "готово" : "ошибка импорта");
+      if (xml && xmls.indexOf(xml) < 0) { xmls.push(xml); }
+      if (!xmls.length) { log("XML не указан", "err"); return; }
+      importXmlList(xmls, 0, function (okAll) {
+        setDot(okAll, okAll ? "готово" : "ошибка импорта");
       });
       return;
     }

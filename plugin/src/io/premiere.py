@@ -857,6 +857,9 @@ def main(argv=None) -> int:
                          "Переключение: Edit > Toggle Switches")
     ap.add_argument("--no-markers", action="store_true",
                     help="не ставить маркеры с причинами склейки")
+    ap.add_argument("--allow-empty", action="store_true",
+                    help="пустой таймлайн не ошибка: секвенция «Отбор» "
+                         "может оказаться пустой, если все исходники взяты")
     ap.add_argument("--trim-rec", action="store_true",
                     help="РЫБА: урезать каждый кусок до верха нормы плана "
                          "(общий 8с, средний 5-6с, крупный 4с, деталь 3с), брать из середины")
@@ -895,7 +898,9 @@ def main(argv=None) -> int:
     clips = load_timeline(tl)
     if not clips:
         print(f"В {tl} нет строк.")
-        return 1
+        # Пустой «Отбор» — не поломка: не взятых исходников может не
+        # оказаться. Основной таймлайн без клипов — ошибка, как и раньше.
+        return 0 if args.allow_empty else 1
     clips = resolve_media(clips, Path(args.media_dir))
     missing = [c for c in clips if not c["exists"]]
     if missing:
