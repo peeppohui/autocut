@@ -36,9 +36,9 @@ def digest(folder: str, out: str, target_sec=None, model="large-v3") -> dict:
     плана (быстро). Панель следит за задачей и импортирует XML, когда
     он готов.
 
-    Секвенций две: «Сбор» — собранный материал (рыба), «Отбор» —
-    не взятые в сборку исходники, чтобы монтажёр подменил кадры, если
-    какие-то не понравятся.
+    Секвенций две: «Сбор (AutoCut)» — собранный материал (рыба),
+    «Отбор» — не взятые в сборку исходники, чтобы монтажёр подменил
+    кадры, если какие-то не понравятся.
     """
     outp = Path(out)
     outp.mkdir(parents=True, exist_ok=True)
@@ -63,7 +63,10 @@ def digest(folder: str, out: str, target_sec=None, model="large-v3") -> dict:
         ("собираю секвенцию «Сбор»",
          [str(SRC / "io" / "premiere.py"), "--timeline", str(plan),
           "--media-dir", str(folder), "--out", str(xml), "--edl", str(edl),
-          "--name", "Сбор"], str(xml)),
+          # «Сбор (AutoCut)», а не просто «Сбор»: в проекте Premiere уже
+          # есть секвенция «Сбор», собранная монтажёром вручную, — одно
+          # имя у двух секвенций путает. Свою всегда узнать можно.
+          "--name", "Сбор (AutoCut)"], str(xml)),
     ]
     task_id = jobs.RUNNER.start("дайджест", steps=steps)
     return {"ok": True, "задача": task_id, "папка": str(outp)}

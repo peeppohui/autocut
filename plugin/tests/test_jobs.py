@@ -147,7 +147,10 @@ ok("второй шаг собирает секвенцию отбора",
    and "Отбор" in second and "--allow-empty" in second, str(second))
 ok("последний шаг собирает XML рыбы",
    any(name.endswith("premiere.py") for name in last)
-   and "--media-dir" in last and "Сбор" in last, str(last))
+   and "--media-dir" in last
+   # Имя секвенции — «Сбор (AutoCut)»: в проекте уже есть ручная
+   # «Сбор», одно имя у двух секвенций путает.
+   and any("Сбор" in name for name in last), str(last))
 # Панель импортирует XML последнего шага — им должен остаться
 # ryba.xml, то есть секвенция «Сбор».
 ok("последним шагом идёт сбор",
