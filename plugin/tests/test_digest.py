@@ -788,6 +788,25 @@ ok("в паузе между спикерами не больше трёх пе�
    bool(_narig) and len(_narig) <= 3,
    str([(round(r[6], 2), round(r[3] - r[2], 2)) for r in _narig]))
 
+# --- пауза закрыта целиком, а не дырой ---
+# Вырезка из клипа нарезки короче паузы, а кусок в паузе должен
+# дорастать до предела слота: иначе между спикерами остаётся пустота.
+_old_dur = DG.clip_duration
+try:
+    DG.clip_duration = lambda p: 10.0
+    _rowsgap = DG.build_digest(_st, _many, _ivgap, _lab2, THEME.idf(_lab2),
+                                print, 120, neural=False)
+finally:
+    DG.clip_duration = _old_dur
+_sig2 = [r for r in _rowsgap if r[0] == "интервью"]
+_gap0 = _sig2[0][6] + (_sig2[0][3] - _sig2[0][2])
+_nargap = [r for r in _rowsgap if r[0] == "нарезка"
+           and _gap0 <= r[6] < _sig2[1][6]]
+ok("пауза между спикерами закрыта перебивками",
+   bool(_nargap) and len(_nargap) <= 3
+   and max(r[6] + r[3] - r[2] for r in _nargap) >= _sig2[1][6] - 0.5,
+   str([(round(r[6], 2), round(r[3] - r[2], 2)) for r in _nargap]))
+
 # --- музыка приглушается под голосом ---
 # Музыка не должна звучать громче спикера: приглушаем её на интервалах
 # стендапа и интервью отдельным файлом (исходник не трогаем).

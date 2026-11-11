@@ -873,6 +873,7 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     """
     rows = []            # (часть, файл, in, out, текст, дорожка, позиция, звук)
     used = set()
+    _dur_cache = {}      # длина клипа нарезки по имени файла
     rec_index = (rec or {}).get("index") or {}
     rec_dir = (rec or {}).get("dir")
     rec_dir_path = Path(rec_dir) if rec_dir else None
@@ -1127,6 +1128,20 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         lab = labels.get(seg[0].name) or {}
         return " ".join((lab.get("text") or "").split()).lower()
 
+    def seg_dur(path):
+        """Длительность клипа нарезки: нужна, чтобы дорастить вырезку.
+
+        Кэш по имени файла: один клип берётся в монтаж один раз, но
+        длина его может понадобиться и при отборе, и при раскладке.
+        """
+        key = path.name
+        if key not in _dur_cache:
+            try:
+                _dur_cache[key] = float(clip_duration(path) or 0.0)
+            except Exception:
+                _dur_cache[key] = 0.0
+        return _dur_cache[key]
+
     def take_broll(seg, pos, limit=None):
         path, a, b, text, plan, hero = seg
         # Кусок обязан влезать в свой слот: иначе он налезает на
@@ -1134,6 +1149,15 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         # эталоне нет. Длина окна — целое число кадров: соседние
         # куски сцепляются в XML без полукадровых развязок.
         eff = (b - a) if limit is None else min(limit, b - a)
+        if limit is not None and limit > eff + 1e-6:
+            # Кусок можно дорастить до предела слота: клип нарезки
+            # длиннее своей вырезки, а предел слота (пауза между
+            # спикерами) длиннее вырезки. Без этого в паузе остаётся
+            # дыра — она читается как недоделанный монтаж, в эталоне
+            # пауза закрыта кусками по 2.9-4.3 с.
+            dur = seg_dur(path)
+            if dur > 0 and a + limit <= dur + 0.02:
+                eff = limit
         b = a + max(1, int(eff * fps + 1e-6)) / fps
         used.add(path.name)
         recent.append(path.name)
