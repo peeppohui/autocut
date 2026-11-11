@@ -395,7 +395,7 @@ function readResult() {
 // Результат едут двумя путями: синхронный возврат evalScript (не
 // везде работает) и файл. Маркер в начале файла страхует от
 // чтения результата прошлого вызова, если свой не успел записаться.
-function runScript(script, cb) {
+function runScript(script, cb, maxTries) {
   try { if (NODE_FS) { NODE_FS.unlinkSync(RESULT_FILE); } } catch (e) { }
   var token = "r" + (new Date()).getTime();
   var wrapped =
@@ -424,7 +424,9 @@ function runScript(script, cb) {
     // Импорт XML и большой readback проекта идут дольше 5 секунд: без
     // запаса панель сделала бы работу и «потеряла» результат, как уже
     // случилось с import_xml. 600 шагов по 50 мс = запас 30 с.
-    if (ready || tries++ > 599) { if (!ready) { cb("ERR|не дождались результата"); } return; }
+    // Импорт «Отбора» (83 клипа) длится дольше, поэтому у него свой
+    // запас ожидания — сколько_нибудь секунд на минуту.
+    if (ready || tries++ > (maxTries || 599)) { if (!ready) { cb("ERR|не дождались результата"); } return; }
     setTimeout(wait, 50);
   })();
 }
@@ -452,7 +454,7 @@ function importXml(path, cb) {
     log("импорт: " + res, String(res).indexOf("OK|") === 0 ? "ok" : "err");
     showSequences();
     if (cb) { cb(res); }
-  });
+  }, 3600);
 }
 
 // --- команды ------------------------------------------------------------
@@ -505,7 +507,7 @@ var COMMANDS = {
       "if(typeof(app.project.importXML)==='function'){app.project.importXML(f);}" +
       "else{app.project.importFiles(f.fsName,false,null,false);}" +
       "return 'OK|XML импортирован: ' + f.name;" +
-      "}catch(e){return 'ERR|' + e.toString();}})()", cb);
+      "}catch(e){return 'ERR|' + e.toString();}})()", cb, 3600);
   },
 
   // Что в проекте: секвенции, дорожки, клипы.
