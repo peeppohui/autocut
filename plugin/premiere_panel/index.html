@@ -172,6 +172,8 @@
     }
     .switch.off { background: none; border: 1px solid var(--line2); }
     .switch.off span { top: 2px; left: 2px; background: var(--dim); }
+    /* Выключенный тумблер: гасим, чтобы не ждали работающей фичи. */
+    .switch:disabled { opacity: .45; cursor: default; }
 
     /* --- главная кнопка --- */
     .btn-main {
@@ -285,7 +287,8 @@
       <div class="label">ТИП РОЛИКА</div>
       <div class="chips" id="chips">
         <button class="chip active" data-kind="digest">Влог</button>
-        <button class="chip" data-kind="interview">Интервью</button>
+        <button class="chip" data-kind="interview" disabled
+                title="отдельный пайплайн интервью: пока не заводит рыбу, импорт не сработает">Интервью</button>
         <button class="chip" data-kind="reels" disabled title="пакет настроек ещё не описан">Рилс</button>
         <button class="chip" data-kind="clip" disabled title="пакет настроек ещё не описан">Клип</button>
       </div>
@@ -326,7 +329,8 @@
              stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <use href="#b-beat" width="24" height="24"></use></svg>
         <div class="name">Резать под бит музыки</div>
-        <button class="switch off" data-flag="cut_to_beat" role="switch" aria-checked="false"><span></span></button>
+        <button class="switch off" data-flag="cut_to_beat" role="switch" aria-checked="false" disabled
+                title="в разработке: детект битов и привязка нарезки к ритму"><span></span></button>
       </div>
     </div>
 
