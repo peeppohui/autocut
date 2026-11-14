@@ -617,7 +617,11 @@ function shortTime(sec) {
   return (m < 10 ? "0" : "") + m + ":" + ((s % 60) < 10 ? "0" : "") + (s % 60);
 }
 
+// Сколько секунд в исходниках: нужно для подписи «вместо X отсмотра».
+var SOURCE_SECONDS = 0;
+
 function showSource(folder, files, seconds) {
+  SOURCE_SECONDS = seconds || 0;
   var name = document.getElementById("source-name");
   var meta = document.getElementById("source-meta");
   if (name) {
@@ -657,20 +661,30 @@ function drawDraft(data) {
   if (time) { time.textContent = timecode(secs); }
   if (tl) {
     tl.innerHTML = "";
+    // Блоки с реальными позициями: мини-таймлайн должен совпадать с
+    // монтажом, иначе картинка врёт. Нарезка рисуется поверх голоса —
+    // так же, как в Premiere.
     for (var i = 0; i < blocks.length; i++) {
       var b = blocks[i];
       var d = document.createElement("div");
-      // Пропорция блока — его доля в хронометраже; цвет идёт по типу.
-      d.style.flex = Math.max(1, Math.round(b.секунд * 10));
+      var from = typeof b.начало === "number" ? b.начало : 0;
+      var to = typeof b.конец === "number" ? b.конец : (b.секунд || 0);
+      var left = secs > 0 ? (from / secs) * 100 : 0;
+      var width = secs > 0 ? ((to - from) / secs) * 100 : 0;
+      d.style.left = Math.max(0, Math.min(100, left)) + "%";
+      d.style.width = Math.max(0.4, Math.min(100 - left, width)) + "%";
       d.style.background = PART_COLORS[b.часть] || "#7C4DFF";
-      d.title = b.часть + ": " + Math.round(b.секунд) + " с";
+      d.title = b.часть + ": " + Math.round(to - from) + " с";
       tl.appendChild(d);
     }
   }
   if (note) {
+    var src = data.исходников_секунд || SOURCE_SECONDS || 0;
     note.textContent = secs > 0
-      ? "Вместо " + humanTime(data.исходников_секунд || 0) +
-        " отсмотра — " + Math.round(secs) + " с готовой «рыбы»"
+      ? (src > 0
+          ? "Вместо " + humanTime(src) + " отсмотра — " +
+            Math.round(secs) + " с готовой «рыбы»"
+          : Math.round(secs) + " с готовой «рыбы» на таймлайне")
       : "Вместо 3 ч отсмотра — готовая «рыба» на таймлайне";
   }
 }

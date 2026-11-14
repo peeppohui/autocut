@@ -125,17 +125,46 @@ def summary(folder: str, out: str = None) -> dict:
                     dur = float(row.get("duration") or 0.0)
                 except ValueError:
                     dur = 0.0
-                rows.append((row.get("part") or "", dur))
+                try:
+                    pos = float(row.get("pos") or 0.0)
+                except ValueError:
+                    pos = 0.0
+                rows.append((row.get("part") or "", dur, pos))
     except OSError as e:
         return {"ok": False, "error": str(e)}
     parts = {}
-    for part, dur in rows:
+    for part, dur, _pos in rows:
         parts[part] = round(parts.get(part, 0.0) + dur, 2)
-    total = round(sum(parts.values()), 2)
+    # Хронометраж — длина ТАЙМЛАЙНА, а не сумма клипов: клипы лежат на
+    # разных дорожках и накладываются, сумма считает одно и то же дважды
+    # (нарезка поверх голоса, музыка под всем).
+    total = round(max([pos + dur for _p, dur, pos in rows] or [0.0]), 2)
+    # Блоки — реальные интервалы по частям, чтобы мини-таймлайн в панели
+    # совпадал с монтажом, а не с суммой дорожек.
+    spans = {}
+    for part, dur, pos in rows:
+        if dur <= 0.0:
+            continue
+        spans.setdefault(part, []).append((pos, pos + dur))
+    blocks = []
+    for part, ivs in spans.items():
+        ivs.sort()
+        cur = None
+        for s, e in ivs:
+            if cur is None:
+                cur = [s, e]
+            elif s <= cur[1] + 0.05:
+                cur[1] = max(cur[1], e)
+            else:
+                blocks.append({"часть": part, "начало": round(cur[0], 2),
+                               "конец": round(cur[1], 2)})
+                cur = [s, e]
+        if cur is not None:
+            blocks.append({"часть": part, "начало": round(cur[0], 2),
+                           "конец": round(cur[1], 2)})
+    blocks.sort(key=lambda b: (b["начало"], b["конец"]))
     return {"ok": True, "клипов": len(rows), "секунд": total,
-            "части": parts,
-            "блоки": [{"часть": p, "секунд": d} for p, d in parts.items()],
-            "есть": True}
+            "части": parts, "блоки": blocks, "есть": True}
 
 
 def get(task_id: str):
