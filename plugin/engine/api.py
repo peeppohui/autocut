@@ -257,6 +257,8 @@ class Handler(BaseHTTPRequestHandler):
                     res = actions.interview(**args)
                 elif name == "material":
                     res = actions.material(**args)
+                elif name == "summary":
+                    res = actions.summary(**args)
                 elif name == "cancel":
                     task_id = args.get("task_id") or args.get("id") or ""
                     res = {"ok": actions.cancel(task_id)}

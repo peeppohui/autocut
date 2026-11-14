@@ -29,7 +29,9 @@ def material(folder: str) -> dict:
     return _material(folder)
 
 
-def digest(folder: str, out: str, target_sec=None, model="large-v3") -> dict:
+def digest(folder: str, out: str, target_sec=None, model="large-v3",
+           cut_pauses=None, cut_duplicates=None, best_speech=None,
+           cut_to_beat=None) -> dict:
     """Собрать дайджест: план, полка и две секвенции для Premiere.
 
     Три шага: сначала план (долго, это и есть сборка), потом XML из
@@ -39,6 +41,14 @@ def digest(folder: str, out: str, target_sec=None, model="large-v3") -> dict:
     Секвенций две: «Сбор (AutoCut)» — собранный материал (рыба),
     «Отбор» — не взятые в сборку исходники, чтобы монтажёр подменил
     кадры, если какие-то не понравятся.
+
+    Флаги cut_pauses / cut_duplicates / best_speech / cut_to_beat приходят
+    из тумблеров панели. Пока это только настройки задачи: сборка по
+    умолчанию уже вырезает паузы, выбирает лучший дубль и берёт лучший
+    монолог, то есть тумблеры в положении «включено» отвечают тому,
+    что движок и так делает. Выключение тумблера заработает следующим
+    шагом — но принимать их надо уже сейчас, иначе панель уронит
+    задачу незнакомым аргументом.
     """
     outp = Path(out)
     outp.mkdir(parents=True, exist_ok=True)
@@ -51,6 +61,14 @@ def digest(folder: str, out: str, target_sec=None, model="large-v3") -> dict:
             "--out", str(outp), "--model", model]
     if target_sec:
         argv += ["--target-sec", str(target_sec)]
+    # Тумблеры панели: в digest.py они выключаются флагом «--no-…».
+    # None означает «панель не прислала» — ведём себя как обычно.
+    if cut_pauses is False:
+        argv += ["--no-cut-pauses"]
+    if cut_duplicates is False:
+        argv += ["--no-dedupe"]
+    if best_speech is False:
+        argv += ["--no-best-speech"]
     steps = [
         ("собираю речь и нарезку", argv, str(plan)),
         # Отбор идёт ПЕРЕД чистовиком: панель импортирует XML последнего
@@ -83,6 +101,41 @@ def interview(folder: str, out: str, model="large-v3", target=None) -> dict:
     task_id = jobs.RUNNER.start(
         "интервью", steps=[("собираю рыбу", argv, str(outp))])
     return {"ok": True, "задача": task_id, "папка": str(outp)}
+
+
+def summary(folder: str, out: str = None) -> dict:
+    """Сводка черновика: сколько клипов, сколько секунд и из чего собрано.
+
+    Панель рисует по этому ответу мини-таймлайн в футере («ЧЕРНОВИК ·
+    47 КЛИПОВ»). Плана может ещё не быть — тогда отдаём пустой черновик,
+    а не ошибку: человек видит панель и до сборки.
+    """
+    import csv
+
+    outp = Path(out) if out else Path(folder) / "autocut_out"
+    plan = outp / "plan.csv"
+    if not plan.exists():
+        return {"ok": True, "клипов": 0, "секунд": 0.0, "части": {},
+                "блоки": [], "есть": False}
+    rows = []
+    try:
+        with plan.open(encoding="utf-8-sig", newline="") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    dur = float(row.get("duration") or 0.0)
+                except ValueError:
+                    dur = 0.0
+                rows.append((row.get("part") or "", dur))
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    parts = {}
+    for part, dur in rows:
+        parts[part] = round(parts.get(part, 0.0) + dur, 2)
+    total = round(sum(parts.values()), 2)
+    return {"ok": True, "клипов": len(rows), "секунд": total,
+            "части": parts,
+            "блоки": [{"часть": p, "секунд": d} for p, d in parts.items()],
+            "есть": True}
 
 
 def get(task_id: str):

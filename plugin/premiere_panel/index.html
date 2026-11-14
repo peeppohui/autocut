@@ -6,78 +6,364 @@
   подбор) делает движок AutoCut, панель спрашивает его по HTTP и
   показывает ход работы. Собранная рыба импортируется в проект
   прямо отсюда — человеку не нужно ничего кликать в Premiere.
+
+  Оформление повторяет макет бренда: тёмная панель, фиолетово-синий
+  градиент только на главной кнопке, чипы и тумблеры. Шрифты лежат
+  рядом (assets/fonts) — в Premiere панели нет интернета.
 -->
-<html>
+<html lang="ru">
 <head>
   <meta charset="utf-8">
   <title>AutoCut</title>
   <style>
+    /* --- шрифты: латиница и кириллица лежат в разных файлах --- */
+    @font-face {
+      font-family: 'Manrope';
+      src: url('assets/fonts/Manrope-400-latin.woff2') format('woff2');
+      font-weight: 400 800; font-style: normal; font-display: swap;
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'Manrope';
+      src: url('assets/fonts/Manrope-400-cyrillic.woff2') format('woff2');
+      font-weight: 400 800; font-style: normal; font-display: swap;
+      unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+    }
+    @font-face {
+      font-family: 'JetBrains Mono';
+      src: url('assets/fonts/JetBrainsMono-400-latin.woff2') format('woff2');
+      font-weight: 400 800; font-style: normal; font-display: swap;
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'JetBrains Mono';
+      src: url('assets/fonts/JetBrainsMono-400-cyrillic.woff2') format('woff2');
+      font-weight: 400 800; font-style: normal; font-display: swap;
+      unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+    }
+
+    :root {
+      --ink: #0D0E1C;
+      --panel: #16172B;
+      --panel2: #1D1E38;
+      --line: #2A2C4A;
+      --line2: #3A3D66;
+      --text: #F4F4FB;
+      --dim: #A6A9C8;
+      --violet: #7C4DFF;
+      --blue: #4D8DFF;
+      --grad: linear-gradient(90deg, #7C4DFF, #5163EE);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
     body {
-      font-family: "Adobe Clean", "Segoe UI", sans-serif;
-      background: #232323; color: #d6d6d6; margin: 0; padding: 10px;
-      font-size: 12px;
+      background: var(--ink);
+      color: var(--text);
+      font-family: 'Manrope', 'Segoe UI', sans-serif;
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
     }
-    h1 { font-size: 13px; margin: 0 0 8px; font-weight: 600; }
-    .row { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
-    .row label { min-width: 78px; color: #9a9a9a; }
-    input[type=text] {
-      flex: 1; background: #1b1b1b; border: 1px solid #4a4a4a; color: #e6e6e6;
-      border-radius: 3px; padding: 4px 6px; font-size: 12px;
+    button { font-family: inherit; cursor: pointer; }
+    .mono { font-family: 'JetBrains Mono', Consolas, monospace; }
+
+    .panel {
+      max-width: 380px;
+      margin: 0 auto;
+      padding: 14px 16px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
     }
-    input[type=number] {
-      width: 58px; background: #1b1b1b; border: 1px solid #4a4a4a;
-      color: #e6e6e6; border-radius: 3px; padding: 4px 6px; font-size: 12px;
+    .label {
+      font-size: 11px; letter-spacing: 0.08em; color: var(--dim);
+      font-weight: 600;
     }
-    button {
-      background: #3a3a3a; color: #e6e6e6; border: 1px solid #555;
-      border-radius: 3px; padding: 5px 9px; cursor: pointer; font-size: 12px;
+
+    /* --- шапка --- */
+    header { display: flex; align-items: center; }
+    /* Логотип: подпись в знаке тёмная, на тёмной панели её не видно —
+       поэтому знак лежит на светлой плашке, как на макете в карточке. */
+    header .logo-box {
+      background: #F4F4FB; border-radius: 10px; padding: 5px 10px;
+      display: flex; align-items: center;
     }
-    button:hover { background: #4a4a4a; }
-    button.main { background: #2d5f8a; border-color: #3a76a8; }
-    button.main:hover { background: #35709f; }
-    button:disabled { opacity: .45; cursor: default; }
-    .dot { width: 9px; height: 9px; border-radius: 50%; background: #7a7a7a; }
-    .dot.on { background: #3ba55d; }
-    .dot.off { background: #d24b4b; }
+    header .logo { height: 34px; width: auto; display: block; }
+    header .spacer { flex: 1; }
+    .icon-btn {
+      width: 44px; height: 44px; background: none; border: 0;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* --- карточка источника с перфорацией киноплёнки --- */
+    .source-card {
+      background: var(--panel2); border: 1px solid var(--line);
+      border-radius: 8px; display: flex; align-items: stretch;
+      overflow: hidden;
+    }
+    .film { width: 14px; flex: none; display: flex; }
+    .film::before {
+      content: ""; width: 6px; height: 100%; margin: 8px auto;
+      background: repeating-linear-gradient(to bottom,
+        var(--ink) 0 6px, transparent 6px 13px);
+    }
+    .source-body {
+      flex: 1; min-width: 0; padding: 12px 8px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .source-text { flex: 1; min-width: 0; }
+    .source-name {
+      font-size: 15px; font-weight: 600; margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .source-meta { font-size: 11px; color: var(--dim); margin-top: 2px; }
+    .ghost {
+      height: 32px; padding: 0 12px; border-radius: 6px;
+      border: 1px solid var(--line2); background: none;
+      color: var(--text); font-size: 12px; flex: none;
+    }
+    .ghost:hover { border-color: var(--dim); }
+
+    /* --- чипы типа ролика --- */
+    .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .chip {
+      height: 34px; padding: 0 16px; border-radius: 17px;
+      border: 1px solid var(--line2); background: none;
+      color: var(--text); font-size: 13px; font-weight: 600;
+    }
+    .chip.active {
+      border: 0; background: var(--grad); color: #FFFFFF;
+    }
+    .chip:disabled { opacity: .4; cursor: default; }
+
+    /* --- длительность --- */
+    .row-label {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .row-label .mono { font-size: 14px; color: #A98BFF; }
+    input[type=range] {
+      width: 100%; margin: 0; background: transparent;
+      -webkit-appearance: none; appearance: none; height: 18px;
+    }
+    input[type=range]::-webkit-slider-runnable-track {
+      height: 4px; border-radius: 2px; background: var(--line2);
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 16px; height: 16px; margin-top: -6px; border-radius: 50%;
+      background: var(--violet); border: 2px solid var(--ink);
+    }
+    input[type=range]:disabled::-webkit-slider-thumb { background: var(--line2); }
+
+    /* --- тумблеры --- */
+    .toggles { display: flex; flex-direction: column; gap: 2px; }
+    .switch-row {
+      display: flex; align-items: center; gap: 10px; height: 40px;
+    }
+    .switch-row .name { flex: 1; font-size: 14px; }
+    .switch {
+      width: 38px; height: 22px; border: 0; border-radius: 11px;
+      background: var(--violet); position: relative; padding: 0; flex: none;
+    }
+    .switch span {
+      position: absolute; top: 3px; left: 19px; width: 16px; height: 16px;
+      border-radius: 8px; background: #FFFFFF; transition: left .12s;
+    }
+    .switch.off { background: none; border: 1px solid var(--line2); }
+    .switch.off span { top: 2px; left: 2px; background: var(--dim); }
+
+    /* --- главная кнопка --- */
+    .btn-main {
+      height: 50px; border: 0; border-radius: 10px; background: var(--grad);
+      color: #FFFFFF; font-size: 16px; font-weight: 800;
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+    }
+    .btn-main:hover { filter: brightness(1.08); }
+    .btn-main:disabled { opacity: .5; cursor: default; filter: none; }
+
+    /* --- футер с черновиком --- */
+    .draft {
+      margin: 16px -16px 0; border-top: 1px solid var(--line);
+      background: var(--ink); padding: 12px 16px 14px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .draft-head {
+      display: flex; justify-content: space-between;
+      font-size: 11px; color: var(--dim);
+    }
+    .ruler {
+      height: 6px;
+      background: repeating-linear-gradient(90deg,
+        var(--line) 0 8px, transparent 8px 14px);
+    }
+    .timeline { display: flex; gap: 3px; height: 26px; }
+    .timeline div { border-radius: 3px; background: var(--violet); min-width: 3px; }
+    .draft-note { font-size: 12px; color: var(--text); }
+
+    /* --- служебное: журнал и кнопки --- */
+    .service { margin: 12px 0 16px; }
+    .service summary {
+      cursor: pointer; font-size: 11px; letter-spacing: .08em;
+      color: var(--dim); font-weight: 600; outline: none;
+    }
+    .service-btns { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+    .service-btns button {
+      background: var(--panel); color: var(--dim); border: 1px solid var(--line);
+      border-radius: 6px; padding: 4px 8px; font-size: 11px;
+    }
+    .service-btns button:hover { color: var(--text); border-color: var(--line2); }
     #log {
-      background: #1b1b1b; border: 1px solid #3a3a3a; border-radius: 3px;
-      height: 260px; overflow-y: auto; padding: 7px; margin-top: 8px;
-      font-family: Consolas, monospace; font-size: 11px; white-space: pre-wrap;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+      height: 200px; overflow-y: auto; padding: 7px; margin-top: 8px;
+      font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px;
+      white-space: pre-wrap;
     }
-    .ok { color: #7fc98a; } .err { color: #e07a7a; } .dim { color: #8a8a8a; }
-    .hint { color: #8a8a8a; margin: 4px 0 8px; }
+    .ok { color: #7FC98A; } .err { color: #E07A7A; } .dim { color: var(--dim); }
+    .hint { color: var(--dim); font-size: 11px; margin: 4px 0 8px; }
+
+    /* --- служебное состояние (движок, ошибки) --- */
+    .status {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: var(--dim);
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #7A7A7A; flex: none; }
+    .dot.on { background: #3BA55D; }
+    .dot.off { background: #D24B4B; }
+    #folder { display: none; }
   </style>
 </head>
 <body>
-  <h1>AutoCut</h1>
+  <div class="panel">
 
-  <div class="row">
-    <label>Материал</label>
-    <input type="text" id="folder" placeholder="папка с исходниками" />
-    <button id="btn-find">Найти</button>
+    <header>
+      <div class="logo-box">
+        <img class="logo" src="assets/logo.png" alt="AutoCut">
+      </div>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="btn-settings" title="Настройки сборки">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <g stroke="#A98BFF">
+            <path d="M4 7h10M18 7h2M4 17h2M10 17h10"></path>
+            <circle cx="16" cy="7" r="2"></circle>
+            <circle cx="8" cy="17" r="2"></circle>
+          </g>
+        </svg>
+      </button>
+    </header>
+
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+      <defs>
+        <linearGradient id="b-g" gradientUnits="userSpaceOnUse" x1="2" y1="2" x2="22" y2="22">
+          <stop offset="0" stop-color="#A98BFF"></stop>
+          <stop offset="1" stop-color="#5E9BFF"></stop>
+        </linearGradient>
+      </defs>
+      <symbol id="b-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"></path><circle cx="16" cy="7" r="2"></circle><circle cx="8" cy="17" r="2"></circle></symbol>
+      <symbol id="b-mute" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4zM16 9l5 6M21 9l-5 6"></path></symbol>
+      <symbol id="b-clip" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"></path></symbol>
+      <symbol id="b-wave" viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4"></path></symbol>
+      <symbol id="b-beat" viewBox="0 0 24 24"><path d="M3 12h3l2-6 4 12 2-6h7"></path></symbol>
+    </svg>
+
+    <div class="source-card">
+      <div class="film"></div>
+      <div class="source-body">
+        <div class="source-text">
+          <div class="label">ИСТОЧНИК</div>
+          <div class="source-name" id="source-name">папка не выбрана</div>
+          <div class="source-meta mono" id="source-meta">—</div>
+        </div>
+        <button class="ghost" id="btn-find">Сменить</button>
+      </div>
+      <div class="film"></div>
+    </div>
+    <input type="text" id="folder" placeholder="папка с исходниками">
+
+    <div>
+      <div class="label">ТИП РОЛИКА</div>
+      <div class="chips" id="chips">
+        <button class="chip active" data-kind="digest">Влог</button>
+        <button class="chip" data-kind="interview">Интервью</button>
+        <button class="chip" data-kind="reels" disabled title="пакет настроек ещё не описан">Рилс</button>
+        <button class="chip" data-kind="clip" disabled title="пакет настроек ещё не описан">Клип</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="row-label">
+        <span class="label">ДЛИТЕЛЬНОСТЬ</span>
+        <span class="mono" id="dur-value">01:00</span>
+      </div>
+      <input type="range" id="target" min="15" max="180" value="60">
+    </div>
+
+    <div class="toggles">
+      <div class="switch-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#A6A9C8"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <use href="#b-mute" width="24" height="24"></use></svg>
+        <div class="name">Убрать паузы</div>
+        <button class="switch" data-flag="cut_pauses" role="switch" aria-checked="true"><span></span></button>
+      </div>
+      <div class="switch-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#A6A9C8"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <use href="#b-clip" width="24" height="24"></use></svg>
+        <div class="name">Убрать дубли</div>
+        <button class="switch" data-flag="cut_duplicates" role="switch" aria-checked="true"><span></span></button>
+      </div>
+      <div class="switch-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#A6A9C8"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <use href="#b-wave" width="24" height="24"></use></svg>
+        <div class="name">Лучшие моменты речи</div>
+        <button class="switch" data-flag="best_speech" role="switch" aria-checked="true"><span></span></button>
+      </div>
+      <div class="switch-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#A6A9C8"
+             stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <use href="#b-beat" width="24" height="24"></use></svg>
+        <div class="name">Резать под бит музыки</div>
+        <button class="switch off" data-flag="cut_to_beat" role="switch" aria-checked="false"><span></span></button>
+      </div>
+    </div>
+
+    <button class="btn-main" id="btn-digest">
+      <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z" fill="#FFFFFF"></path></svg>
+      Собрать рыбу
+    </button>
+
+    <div class="draft">
+      <div class="draft-head mono">
+        <span id="draft-title">ЧЕРНОВИК · 0 КЛИПОВ</span>
+        <span id="draft-time">00:00:00:00</span>
+      </div>
+      <div class="ruler"></div>
+      <div class="timeline" id="draft-timeline"></div>
+      <div class="ruler"></div>
+      <div class="draft-note" id="draft-note">Вместо 3 ч отсмотра — готовая «рыба» на таймлайне</div>
+    </div>
+
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="state">проверяю движок…</span>
+    </div>
+
+    <details class="service">
+      <summary>ЖУРНАЛ И СЛУЖЕБНОЕ</summary>
+      <div class="service-btns">
+        <button id="btn-check">Что в проекте</button>
+        <button id="btn-doctor">Проверить движок</button>
+        <button id="btn-refresh">Обновить</button>
+        <button id="btn-cancel">Отменить задачу</button>
+      </div>
+      <div class="hint" id="parts"></div>
+      <div id="log"></div>
+    </details>
+
   </div>
-
-  <div class="row">
-    <label>Хронометраж</label>
-    <input type="number" id="target" value="120" />
-    <span class="dim">сек</span>
-    <button id="btn-digest" class="main">Собрать дайджест</button>
-    <button id="btn-cancel">Отменить</button>
-  </div>
-
-  <div class="row">
-    <span class="dot" id="dot"></span>
-    <span id="state">проверяю движок…</span>
-  </div>
-
-  <div class="row">
-    <button id="btn-check">Что в проекте</button>
-    <button id="btn-doctor">Проверить движок</button>
-    <button id="btn-refresh">Обновить</button>
-  </div>
-
-  <div class="hint" id="parts"></div>
-  <div id="log"></div>
 
   <script src="panel.js"></script>
 </body>

@@ -107,7 +107,7 @@ STANDUP_MAX_PIECE = 12.0
 
 
 def phrase_pieces(words, max_piece=MAX_PIECE, min_piece=MIN_PIECE,
-                  limit_sec=None):
+                  limit_sec=None, keep_pauses=False):
     """Слова -> куски ролика, разрезанные по границам фраз.
 
     Куски режутся не по таймеру, а там, где кончилась фраза: обрыв
@@ -121,6 +121,10 @@ def phrase_pieces(words, max_piece=MAX_PIECE, min_piece=MIN_PIECE,
     """
     if not words:
         return []
+    if keep_pauses:
+        # Паузы не вырезаются — кусок может быть длиннее, иначе он
+        # порвётся на границе MAX_PIECE прямо посреди паузы.
+        max_piece = max(max_piece, STANDUP_MAX_PIECE)
     groups = []
     cur = []
     prev_end = None
@@ -132,7 +136,7 @@ def phrase_pieces(words, max_piece=MAX_PIECE, min_piece=MIN_PIECE,
             # закончило предложение. Знак смотрим у ПРЕДЫДУЩЕГО слова:
             # иначе «четыре.» уезжало бы в следующий кусок и фраза
             # «раз два три четыре» рассыпалась.
-            if gap > PHRASE_GAP or prev_ends_sentence:
+            if (gap > PHRASE_GAP and not keep_pauses) or prev_ends_sentence:
                 # Граничное слово начинает СЛЕДУЮЩУЮ группу. Если
                 # закрыть им текущую, кусок растянется на паузу и
                 # следующий начнётся с её середины.
@@ -265,7 +269,7 @@ def pick_best_take(candidates, rec_index=None):
 
 
 def process_standup(folder: Path, work: Path, model_name, device, log,
-                    budget=None, rec_index=None):
+                    budget=None, rec_index=None, dedupe=True):
     """Лучший дубль стендапа -> [(файл, in, out, текст, слова)].
 
     ОДИН кусок, непрерывный звук. В готовом дайджесте стендап шёл
@@ -295,7 +299,16 @@ def process_standup(folder: Path, work: Path, model_name, device, log,
         words = speak_words(p, work, model_name, device)
         if words:
             cands.append((p, words))
-    best = pick_best_take(cands, rec_index)
+    if dedupe:
+        best = pick_best_take(cands, rec_index)
+    else:
+        # Тумблер «Убрать дубли» выключен: берём первый дубль с речью,
+        # без сравнения дублей между собой.
+        best = None
+        for p, words in cands:
+            best = ((0.0, 0.0, 0.0), p, words,
+                    sum(w[2] - w[1] for w in words))
+            break
     if not best:
         log("Стенап: ни один дубль не дал разборчивой речи")
         return []
@@ -379,7 +392,7 @@ def best_monologue(words, gap=MONO_GAP):
 
 
 def process_interviews(folder: Path, work: Path, model_name, device, log,
-                       budget=None):
+                       budget=None, keep_pauses=False, best_speech=True):
     """Ответы спикеров, нарезанные по фразам.
 
     Возвращает [(файл, [(in, out, текст), ...])] — по спикеру один
@@ -390,6 +403,11 @@ def process_interviews(folder: Path, work: Path, model_name, device, log,
     Из файла берётся не начало, а ЛУЧШИЙ МОНОЛОГ спикера — самый
     длинный заход речи без длинного молчания. Начало файла может быть
     разгоном или ответом на чужой вопрос, и тогда в эфир уходит огрызок.
+    Тумблер «Лучшие моменты речи» это отключает — тогда берётся начало
+    файла, как раньше.
+
+    keep_pauses — тумблер «Убрать паузы» в выключенном состоянии:
+    паузы внутри речи остаются в куске.
     """
     files = videos(folder)
     if not files:
@@ -406,10 +424,10 @@ def process_interviews(folder: Path, work: Path, model_name, device, log,
         if not words:
             log("  {}: речи нет, пропускаю".format(p.name))
             continue
-        mono = best_monologue(words)
+        mono = best_monologue(words) if best_speech else words
         if not mono:
             continue
-        pieces = phrase_pieces(mono, limit_sec=per)
+        pieces = phrase_pieces(mono, limit_sec=per, keep_pauses=keep_pauses)
         if not pieces:
             continue
         log("  {}: монолог {:.0f}с, {} кусков по фразам, {:.0f}с".format(
@@ -853,7 +871,8 @@ def otbor_rows(rows, parts):
 
 
 def build_digest(standup, broll, interviews, labels, weights, log,
-                 target, neural=True, rec=None, music=None):
+                 target, neural=True, rec=None, music=None,
+                 dedupe=True, best_speech=True):
     """Рыба дайджеста по эталонному проекту.
 
     **Два слоя.** В эталоне («дайджест домашка») голос лежит на V1, а
@@ -1186,18 +1205,18 @@ def build_digest(standup, broll, interviews, labels, weights, log,
                                   neural=neural, vecs=vecs)
         why = []
         for name, _score in best:
-            if name in used or too_similar(name):
+            if name in used or (dedupe and too_similar(name)):
                 why.append(name + ": уже взят или похож")
                 continue
             seg = broll_by_name(broll, name)
             if seg is None:
                 why.append(name + ": нет в списке")
                 continue
-            if not varied(seg) or near_number(name):
+            if not varied(seg) or (dedupe and near_number(name)):
                 why.append(name + ": план/номер соседний")
                 continue
             key = theme_key(seg)
-            if key and key in used_themes:
+            if dedupe and key and key in used_themes:
                 # Одна тема — один кадр. Иначе в ролике два раза
                 # показывают один и тот же кусок мероприятия, и монтажёр
                 # видит это как «монтаж не сделан».
@@ -1343,12 +1362,12 @@ def build_digest(standup, broll, interviews, labels, weights, log,
         """
         for seg in broll:
             name = seg[0].name
-            if name in used or too_similar(name):
+            if name in used or (dedupe and too_similar(name)):
                 continue
-            if not varied(seg) or near_number(name):
+            if not varied(seg) or (dedupe and near_number(name)):
                 continue
             key = theme_key(seg)
-            if key and key in used_themes:
+            if dedupe and key and key in used_themes:
                 continue
             return seg
         return None
@@ -1489,6 +1508,14 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default="auto")
     ap.add_argument("--target-sec", type=float, default=None,
                     help="хронометраж дайджеста; пусто — digest.target_sec (120)")
+    # Тумблеры панели. По умолчанию всё включено: сборка должна вести
+    # себя как прежде, если панель ничего не передала.
+    ap.add_argument("--no-cut-pauses", action="store_true",
+                    help="оставить паузы внутри речи (тумблер «Убрать паузы» выкл.)")
+    ap.add_argument("--no-dedupe", action="store_true",
+                    help="не отбирать лучший дубль и не отсекать повторы")
+    ap.add_argument("--no-best-speech", action="store_true",
+                    help="брать начало файла, а не лучший монолог спикера")
     args = ap.parse_args(argv)
 
     # Абсолютный base: иначе рекордер, найденный относительно него,
@@ -1571,7 +1598,8 @@ def main(argv=None) -> int:
         rec["index"] = recsound.rec_index(rec_dir, work, args.model, log=log)
         log("Рекордер: файлов с речью {}".format(len(rec["index"])))
     front = process_standup(parts["standup"], work, args.model, args.device, log,
-                            budget=st_budget, rec_index=rec["index"])
+                            budget=st_budget, rec_index=rec["index"],
+                            dedupe=not args.no_dedupe)
 
     # ---- нарезка: короткие вырезки из отобранных клипов ----
     # autocut здесь не участвует: он подбирает клипы под БЮДЖЕТ хронометража,
@@ -1590,7 +1618,9 @@ def main(argv=None) -> int:
     # ---- интервью: куски по фразам ----
     iv_budget = target - target * SHARE_STANDUP - target * SHARE_BROLL
     back = process_interviews(parts["interview"], work, args.model, args.device,
-                              log, budget=iv_budget)
+                              log, budget=iv_budget,
+                              keep_pauses=args.no_cut_pauses,
+                              best_speech=not args.no_best_speech)
 
     # Распознавание закончено. Whisper занимает 3 ГБ, кодировщик темы
     # ещё 2.2 ГБ, а видеопамяти 6 ГБ. Освобождаем здесь, а не раньше:
@@ -1623,7 +1653,9 @@ def main(argv=None) -> int:
         log("Музыка: mp3 в корне материала нет — идём без подложки")
 
     rows = build_digest(front, broll, back, labels, weights, log, target,
-                        rec=rec, music=music)
+                        rec=rec, music=music,
+                        dedupe=not args.no_dedupe,
+                        best_speech=not args.no_best_speech)
 
     # Музыка на стендапе и интервью уходит вниз — она фон, а не второй
     # голос. Приглушаем сам файл (копию в work), исходник не трогаем.

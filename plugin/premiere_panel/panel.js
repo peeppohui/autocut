@@ -583,6 +583,115 @@ function runCommand(cmd) {
 
 // --- действия ------------------------------------------------------------
 
+// --- вид панели -----------------------------------------------------------
+//
+// Карточка источника, футер-черновик и тумблеры — это вид, а не логика.
+// Логика в движке: панель только спрашивает и рисует.
+
+function humanTime(sec) {
+  // «3 ч 42 мин» из секунд: так человек читает объём материала.
+  var s = Math.max(0, Math.round(sec || 0));
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  if (h) { return h + " ч " + m + " мин"; }
+  if (m) { return m + " мин"; }
+  return s + " с";
+}
+
+function timecode(sec, fps) {
+  // 00:01:00:00 — часы:минуты:секунды:кадры, как в Premiere.
+  fps = fps || 25;
+  var s = Math.max(0, sec || 0);
+  var f = Math.floor((s % 1) * fps);
+  var total = Math.floor(s);
+  var hh = Math.floor(total / 3600);
+  var mm = Math.floor((total % 3600) / 60);
+  var ss = total % 60;
+  function two(v) { return (v < 10 ? "0" : "") + v; }
+  return two(hh) + ":" + two(mm) + ":" + two(ss) + ":" + two(f);
+}
+
+function shortTime(sec) {
+  var s = Math.max(0, Math.round(sec || 0));
+  var m = Math.floor(s / 60);
+  return (m < 10 ? "0" : "") + m + ":" + ((s % 60) < 10 ? "0" : "") + (s % 60);
+}
+
+function showSource(folder, files, seconds) {
+  var name = document.getElementById("source-name");
+  var meta = document.getElementById("source-meta");
+  if (name) {
+    var parts = String(folder || "").replace(/[\\/]+$/, "").split(/[\\/]/);
+    name.textContent = parts[parts.length - 1] || "—";
+    name.title = folder || "";
+  }
+  if (meta) {
+    meta.textContent = files + " клипов · " + humanTime(seconds);
+  }
+}
+
+// Флаги тумблеров: панель их собирает и отдаёт движку.
+function flags() {
+  var out = {};
+  var rows = document.querySelectorAll(".switch");
+  for (var i = 0; i < rows.length; i++) {
+    var b = rows[i];
+    out[b.getAttribute("data-flag")] = !b.classList.contains("off");
+  }
+  return out;
+}
+
+// Черновик в футере: сколько клипов и из чего собрано.
+function drawDraft(data) {
+  var title = document.getElementById("draft-title");
+  var time = document.getElementById("draft-time");
+  var tl = document.getElementById("draft-timeline");
+  var note = document.getElementById("draft-note");
+  if (!data) { return; }
+  var blocks = data.блоки || [];
+  var clips = data.клипов || 0;
+  var secs = data.секунд || 0;
+  if (title) {
+    title.textContent = "ЧЕРНОВИК · " + clips + " КЛИПОВ";
+  }
+  if (time) { time.textContent = timecode(secs); }
+  if (tl) {
+    tl.innerHTML = "";
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i];
+      var d = document.createElement("div");
+      // Пропорция блока — его доля в хронометраже; цвет идёт по типу.
+      d.style.flex = Math.max(1, Math.round(b.секунд * 10));
+      d.style.background = PART_COLORS[b.часть] || "#7C4DFF";
+      d.title = b.часть + ": " + Math.round(b.секунд) + " с";
+      tl.appendChild(d);
+    }
+  }
+  if (note) {
+    note.textContent = secs > 0
+      ? "Вместо " + humanTime(data.исходников_секунд || 0) +
+        " отсмотра — " + Math.round(secs) + " с готовой «рыбы»"
+      : "Вместо 3 ч отсмотра — готовая «рыба» на таймлайне";
+  }
+}
+
+var PART_COLORS = {
+  "стендап": "#7C4DFF",
+  "интервью": "#5163EE",
+  "нарезка": "#5E7BFF",
+  "музыка": "#4D8DFF"
+};
+
+function refreshDraft() {
+  var folder = document.getElementById("folder").value.trim();
+  if (!folder) { return; }
+  postJson("/action", {action: "summary", args: {folder: folder}},
+           function (err, res) {
+             if (err || !res || !res.ok) { return; }
+             drawDraft(res);
+           });
+}
+
 function findMaterial() {
   var folder = document.getElementById("folder").value.trim();
   if (!folder) { log("укажите папку с материалом", "err"); return; }
@@ -593,13 +702,42 @@ function findMaterial() {
              if (!res.ok) { log(res.error || "не нашлось", "err"); return; }
              var parts = res.части || {};
              var out = [];
+             var files = 0, seconds = 0;
              for (var k in parts) {
+               files += parts[k].файлов || 0;
+               seconds += parts[k].секунд || 0;
                out.push(k + ": " + parts[k].файлов + " шт, " +
                         parts[k].секунд + " с");
              }
+             showSource(folder, files, seconds);
              document.getElementById("parts").textContent = out.join("   |   ");
              log("найдено: " + out.join("  |  "), "ok");
+             refreshDraft();
            });
+}
+
+// Выбор папки: диалог Premiere. Если диалог недоступен (или его
+// закрыли), показываем поле ввода — панель не должна упираться в
+// одно окно.
+function pickFolder() {
+  var script =
+    "(function(){try{" +
+    "var f=Folder.selectDialog('Выберите папку с материалом');" +
+    "if(!f){return 'ERR|отменено';}" +
+    "return 'OK|' + f.fsName;" +
+    "}catch(e){return 'ERR|' + e.toString();}})()";
+  runScript(script, function (res) {
+    var text = String(res || "");
+    if (text.indexOf("OK|") !== 0) {
+      log("папка не выбрана", "dim");
+      return;
+    }
+    var input = document.getElementById("folder");
+    input.value = text.slice(3);
+    try { window.localStorage.setItem("autocut.folder", input.value); }
+    catch (e) { }
+    findMaterial();
+  });
 }
 
 function buildDigest() {
@@ -608,9 +746,13 @@ function buildDigest() {
   var target = document.getElementById("target").value.trim();
   var out = folder.replace(/[\\/]+$/, "") + "/autocut_out";
   log("собираю дайджест, это минуты", "dim");
+  var args = {folder: folder, out: out, target_sec: target ? Number(target) : null};
+  // Флаги тумблеров: движок сам решает, что с ними делать.
+  var f = flags();
+  for (var k in f) { args[k] = f[k]; }
   postJson("/action", {
     action: "digest",
-    args: {folder: folder, out: out, target_sec: target ? Number(target) : null}
+    args: args
   }, function (err, res) {
     if (err || !res || !res.ok) {
       log("движок не взял задачу: " + (res && res.error ? res.error : "?"), "err");
@@ -759,6 +901,69 @@ function poll() {
   });
 }
 
+// --- вид: слайдер, тумблеры, чипы ---------------------------------------
+
+function initView() {
+  // Длительность: монотаймкод рядом со слайдером.
+  var slider = document.getElementById("target");
+  var dur = document.getElementById("dur-value");
+  function syncDur() {
+    if (!dur) { return; }
+    dur.textContent = shortTime(Number(slider.value || 0));
+  }
+  if (slider) {
+    slider.addEventListener("input", syncDur);
+    syncDur();
+  }
+
+  // Тумблеры: включен/выключен меняет вид и запоминается.
+  var sw = document.querySelectorAll(".switch");
+  for (var i = 0; i < sw.length; i++) {
+    (function (btn) {
+      var key = "autocut.flag." + btn.getAttribute("data-flag");
+      try {
+        var saved = window.localStorage.getItem(key);
+        if (saved === "0") { btn.classList.add("off"); }
+        if (saved === "1") { btn.classList.remove("off"); }
+      } catch (e) { }
+      btn.addEventListener("click", function () {
+        var off = btn.classList.toggle("off");
+        btn.setAttribute("aria-checked", off ? "false" : "true");
+        try { window.localStorage.setItem(key, off ? "0" : "1"); }
+        catch (e) { }
+      });
+    })(sw[i]);
+  }
+
+  // Чипы типа ролика: активный — с градиентом.
+  var chips = document.querySelectorAll(".chip");
+  for (var j = 0; j < chips.length; j++) {
+    (function (chip) {
+      chip.addEventListener("click", function () {
+        if (chip.disabled) { return; }
+        for (var k = 0; k < chips.length; k++) {
+          chips[k].classList.remove("active");
+        }
+        chip.classList.add("active");
+        try {
+          window.localStorage.setItem("autocut.kind", chip.getAttribute("data-kind"));
+        } catch (e) { }
+      });
+    })(chips[j]);
+  }
+
+  // Прошлую папку помним: каждый раз искать заново неудобно.
+  var input = document.getElementById("folder");
+  try {
+    var savedFolder = window.localStorage.getItem("autocut.folder");
+    if (savedFolder && input) {
+      input.value = savedFolder;
+      showSource(savedFolder, 0, 0);
+      findMaterial();
+    }
+  } catch (e) { }
+}
+
 window.addEventListener("load", function () {
   var bFind = document.getElementById("btn-find");
   var bBuild = document.getElementById("btn-digest");
@@ -766,7 +971,7 @@ window.addEventListener("load", function () {
   var bCancel = document.getElementById("btn-cancel");
   var bDoctor = document.getElementById("btn-doctor");
   var bRefresh = document.getElementById("btn-refresh");
-  if (bFind) { bFind.addEventListener("click", findMaterial); }
+  if (bFind) { bFind.addEventListener("click", pickFolder); }
   if (bBuild) { bBuild.addEventListener("click", buildDigest); }
   if (bCheck) { bCheck.addEventListener("click", checkProject); }
   if (bCancel) { bCancel.addEventListener("click", cancelTask); }
@@ -778,6 +983,7 @@ window.addEventListener("load", function () {
       poll();
     });
   }
+  initView();
   log("панель AutoCut поднялась", "dim");
   poll();
   pollCommands();

@@ -156,6 +156,35 @@ ok("последний шаг собирает XML рыбы",
 ok("последним шагом идёт сбор",
    str(steps[-1][2]).endswith("ryba.xml"), str(steps[-1][2]))
 
+# Тумблеры панели доезжают до сборки: выключенный тумблер превращается
+# в флаг «--no-…», включённый (или отсутствующий) — в ничего.
+calls.clear()
+actions.jobs.RUNNER.start = fake_start
+try:
+    with tempfile.TemporaryDirectory() as td:
+        actions.digest(str(_P(td) / "материал"), str(_P(td) / "результат"),
+                       cut_pauses=False, cut_duplicates=False,
+                       best_speech=False)
+finally:
+    actions.jobs.RUNNER.start = real_start
+argv_off = calls[0][2][0][1] if calls and calls[0][2] else []
+ok("выключенные тумблеры едут в сборку",
+   "--no-cut-pauses" in argv_off and "--no-dedupe" in argv_off
+   and "--no-best-speech" in argv_off, str(argv_off))
+
+calls.clear()
+actions.jobs.RUNNER.start = fake_start
+try:
+    with tempfile.TemporaryDirectory() as td:
+        actions.digest(str(_P(td) / "материал"), str(_P(td) / "результат"),
+                       cut_pauses=True, cut_duplicates=True,
+                       best_speech=True)
+finally:
+    actions.jobs.RUNNER.start = real_start
+argv_on = calls[0][2][0][1] if calls and calls[0][2] else []
+ok("включённые тумблеры не ломают сборку",
+   not any(a.startswith("--no-") for a in argv_on), str(argv_on))
+
 print()
 if fail:
     print(f"JOBS FAIL ({len(fail)}): {fail}")

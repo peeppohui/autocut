@@ -6,6 +6,7 @@
 `importFiles` вместо `importXML`, потерянный колбэк импорта и
 отсутствие кнопки отмены.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -81,6 +82,37 @@ ok("результат команды уходит в мост",
 ok("есть отладочная дверь пробной команды",
    "probe: function" in JS,
    "поиск нужного API Premiere без неё требует переустановки панели")
+
+# --- оформление по макету бренда -----------------------------------------
+#
+# Панель — это HTML+CSS в Premiere, поэтому макет переносится почти
+# буквально. Проверяем, что всё на месте: разметка, шрифты, логотип.
+ids = set(re.findall(r'id="([A-Za-z0-9_-]+)"', HTML))
+need = {"source-name", "source-meta", "dur-value", "target", "folder",
+        "btn-find", "btn-digest", "btn-cancel", "btn-check", "btn-doctor",
+        "btn-refresh", "dot", "state", "parts", "log", "draft-title",
+        "draft-time", "draft-timeline", "draft-note", "chips"}
+ok("разметка макета на месте", need <= ids, sorted(need - ids))
+ok("шрифты подключены локально",
+   HTML.count("@font-face") == 4 and "assets/fonts/" in HTML,
+   "в Premiere панели нет интернета — шрифты должны лежать рядом")
+ok("кириллица описана отдельным диапазоном", "U+0400-045F" in HTML)
+for _f in ("Manrope-400-latin.woff2", "Manrope-400-cyrillic.woff2",
+           "JetBrainsMono-400-latin.woff2", "JetBrainsMono-400-cyrillic.woff2"):
+    ok("шрифт {} лежит рядом с панелью".format(_f),
+       (PANEL / "assets" / "fonts" / _f).exists())
+ok("логотип лежит рядом с панелью",
+   (PANEL / "assets" / "logo.png").exists())
+ok("палитра макета в стилях",
+   "#0D0E1C" in HTML and "#7C4DFF" in HTML and "#4D8DFF" in HTML)
+ok("тумблеры видны и собираются",
+   "function flags()" in JS and 'data-flag="cut_pauses"' in HTML)
+ok("черновик рисуется в футере",
+   "function drawDraft" in JS and 'id="draft-timeline"' in HTML)
+ok("сводка черновика спрашивается у движка",
+   'action: "summary"' in JS and 'name == "summary"' in BRIDGE)
+ok("движок умеет сводку", "def summary(" in ACTIONS)
+ok("выбор папки диалогом Premiere", "Folder.selectDialog" in JS)
 
 if fail:
     print("PANEL FAIL ({})".format(", ".join(fail)))
