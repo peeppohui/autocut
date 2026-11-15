@@ -870,9 +870,38 @@ def otbor_rows(rows, parts):
     return out
 
 
+def _snap_grid(t: float, times, tol: float = 0.25, floor=None):
+    """Ближайшая доля сетки к моменту t.
+
+    Двигать точку можно и назад: слот (пауза, реплика) редко начинается
+    ровно на доле, и если привязывать только вперёд, вся цепочка кусков
+    уезжает с такта на этот сдвиг. Назад — не больше, чем на tol, и не
+    наезжая на предыдущий кусок (floor = его конец). Если рядом доли
+    нет — оставляем t: монтаж без ритма лучше, чем натянутый на
+    случайный бит.
+    """
+    if not times:
+        return t
+    import bisect
+    i = bisect.bisect_left(times, t - tol)
+    best = None
+    for j in (i - 1, i, i + 1):
+        if not (0 <= j < len(times)):
+            continue
+        d = times[j]
+        if floor is not None and d < floor - 1e-6:
+            continue
+        gap = abs(d - t)
+        if best is None or gap < best[0]:
+            best = (gap, d)
+    if best is None or best[0] > tol:
+        return t
+    return best[1]
+
+
 def build_digest(standup, broll, interviews, labels, weights, log,
                  target, neural=True, rec=None, music=None,
-                 dedupe=True, best_speech=True):
+                 dedupe=True, best_speech=True, beat=None):
     """Рыба дайджеста по эталонному проекту.
 
     **Два слоя.** В эталоне («дайджест домашка») голос лежит на V1, а
@@ -1383,6 +1412,15 @@ def build_digest(standup, broll, interviews, labels, weights, log,
     slots.sort(key=lambda s: s["s"])
     measure_i = 0
     counts = {}            # сколько перебивок уже лежит в группе
+    # Сетка ритма: монтажные точки встают на доли такта, длины кусков
+    # кратны доле. Пустая сетка — монтаж как раньше, по обычным мерам.
+    beat_times = [float(b) for b in (beat or [])]
+    beat_step = 0.0
+    if len(beat_times) > 1:
+        gaps = [b - a for a, b in zip(beat_times, beat_times[1:])
+                if b - a > 0.05]
+        beat_step = min(gaps) if gaps else 0.0
+    last_end = -1.0          # конец последней взятой перебивки нарезки
     for slot in slots:
         start, end = slot["s"], slot["e"]
         theme_text = slot["theme"]
@@ -1406,6 +1444,11 @@ def build_digest(standup, broll, interviews, labels, weights, log,
                 seg = leftover_cand()
             if seg is None:
                 break
+            if beat_step > 0:
+                # Начало куска — на доле, но не наезжая на предыдущий.
+                pos = _snap_grid(pos, beat_times, 0.25, floor=last_end)
+                if pos >= end - 0.5:
+                    break
             room = max(1, int((end - pos) * fps + 1e-6)) / fps
             if maxlen:
                 # В паузе кусок длиннее обычной меры: иначе лимит в
@@ -1414,12 +1457,23 @@ def build_digest(standup, broll, interviews, labels, weights, log,
                 limit = min(maxlen, room, share)
             else:
                 limit = min(mq[measure_i % len(mq)], room)
+            if beat_step > 0:
+                # Длина куска — целое число долей: и начало, и конец
+                # монтажа тогда лежат на сетке такта.
+                n = max(1, int(round(limit / beat_step)))
+                limit = n * beat_step
+                if limit > room + 1e-6:
+                    n = int(room / beat_step)
+                    if n < 1:
+                        break
+                    limit = n * beat_step
             measure_i += 1
             if limit < 1.0:
                 break
             row = take_broll(seg, pos, limit=limit)
             rows.append(row)
             pos += row[3] - row[2]
+            last_end = pos
             if left is not None:
                 left -= 1
                 used_in_grp += 1
@@ -1516,6 +1570,8 @@ def main(argv=None) -> int:
                     help="не отбирать лучший дубль и не отсекать повторы")
     ap.add_argument("--no-best-speech", action="store_true",
                     help="брать начало файла, а не лучший монолог спикера")
+    ap.add_argument("--cut-to-beat", action="store_true",
+                    help="резать монтаж по биту музыки")
     args = ap.parse_args(argv)
 
     # Абсолютный base: иначе рекордер, найденный относительно него,
@@ -1652,10 +1708,31 @@ def main(argv=None) -> int:
     else:
         log("Музыка: mp3 в корне материала нет — идём без подложки")
 
+    # Сетка ритма — по исходной музыке: приглушение ритм не меняет, а
+    # файл приглушённый появится только после сборки.
+    beat_times = []
+    if args.cut_to_beat:
+        if music is None:
+            log("Ритм: музыки нет — монтаж по обычным мерам")
+        else:
+            try:
+                from ml import beat as beatmod
+                grid = beatmod.grid(path=music)
+            except Exception as exc:
+                grid = {}
+                log("Ритм: не разобрали ({})".format(exc))
+            if grid:
+                beat_times = grid["times"]
+                log("Ритм: {} BPM, {} долей".format(grid["bpm"],
+                                                    len(beat_times)))
+            else:
+                log("Ритм: в музыке не нашли — монтаж по обычным мерам")
+
     rows = build_digest(front, broll, back, labels, weights, log, target,
                         rec=rec, music=music,
                         dedupe=not args.no_dedupe,
-                        best_speech=not args.no_best_speech)
+                        best_speech=not args.no_best_speech,
+                        beat=beat_times)
 
     # Музыка на стендапе и интервью уходит вниз — она фон, а не второй
     # голос. Приглушаем сам файл (копию в work), исходник не трогаем.

@@ -842,5 +842,37 @@ ok("фильтр приглушения музыки собран по инте�
 ok("без речи фильтр приглушения пустой",
    DG.duck_filter([]) == "", DG.duck_filter([]))
 
+# --- монтаж по биту ---
+# Тумблер «Резать под бит музыки»: точки монтажа встают на доли
+# такта, длины кусков кратны доле. Сетка здесь искусственная —
+# ровные полусекунды.
+_beats = [i * 0.5 for i in range(240)]
+_rowsb = DG.build_digest(_st, _many, _ivgap, _lab2, THEME.idf(_lab2),
+                         print, 120, neural=False, beat=_beats)
+_narb = [r for r in _rowsb if r[0] == "нарезка"]
+
+
+def _on_grid(t, step=0.5):
+    return abs(t / step - round(t / step)) < 0.02
+
+
+_off = [r for r in _narb if not _on_grid(r[6])]
+# Первая нарезка — J-cut под конец стендапа: он ставится по стендапу,
+# а не по такту, иначе хвост стендапа прыгал бы.
+ok("нарезка ложится на доли такта",
+   len(_narb) > 3 and len(_off) <= 1,
+   str([(round(r[6], 3), round(r[3] - r[2], 3)) for r in _off]))
+ok("длины кусков кратны доле",
+   all(_on_grid(r[3] - r[2]) for r in _narb[1:]),
+   str([(round(r[6], 3), round(r[3] - r[2], 3)) for r in _narb
+        if not _on_grid(r[3] - r[2])]))
+# Без сетки монтаж идёт по обычным мерам: доли не соблюдаются.
+_rowsnb = DG.build_digest(_st, _many, _ivgap, _lab2, THEME.idf(_lab2),
+                          print, 120, neural=False)
+_narb0 = [r for r in _rowsnb if r[0] == "нарезка"]
+ok("без бита монтаж обычный",
+   any(not _on_grid(r[6]) for r in _narb0[1:]),
+   str([(round(r[6], 3), round(r[3] - r[2], 3)) for r in _narb0[:6]]))
+
 print("DIGEST " + ("OK" if not fail else "FAIL " + ", ".join(fail)))
 sys.exit(1 if fail else 0)

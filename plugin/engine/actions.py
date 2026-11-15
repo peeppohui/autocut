@@ -69,6 +69,8 @@ def digest(folder: str, out: str, target_sec=None, model="large-v3",
         argv += ["--no-dedupe"]
     if best_speech is False:
         argv += ["--no-best-speech"]
+    if cut_to_beat:
+        argv += ["--cut-to-beat"]
     steps = [
         ("собираю речь и нарезку", argv, str(plan)),
         # Отбор идёт ПЕРЕД чистовиком: панель импортирует XML последнего
