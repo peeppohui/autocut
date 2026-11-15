@@ -81,7 +81,12 @@ thumbs/
 *.srt
 *.png
 !plugin/src/ui/assets/*.png
+# Логотип панели — часть интерфейса, ему место в репозитории
+!plugin/premiere_panel/assets/*.png
 
 plugin/src/io/_ffconcat.tmp
 _preview_tmp/
 plugin/src/ui/assets/_check_*.png
+
+# Логи движка
+plugin/autocut_engine.err.log
