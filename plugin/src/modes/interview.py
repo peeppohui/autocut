@@ -460,6 +460,44 @@ def mark_unsure(words: List[Word], min_prob: float,
     return marked, hopeless
 
 
+# Фразы, которые Whisper выдаёт на тишине и музыке: он обучен на
+# субтитрах с YouTube. Уверенность у них бывает высокой, поэтому
+# фильтр по prob их не ловит, и в рыбу попадают «Субтитры сделал ...».
+HALLUCINATION_PHRASES = (
+    "субтитры сделал", "субтитры создавал", "субтитры подогнал",
+    "субтитры делал", "субтитры добавил", "редактор субтитров",
+    "корректор", "продолжение следует", "спасибо за просмотр",
+    "подписывайтесь на канал", "ставьте лайки",
+)
+
+
+def drop_known_hallucinations(words: List[Word],
+                              phrases=HALLUCINATION_PHRASES) -> int:
+    """Снимает слова, образующие известную фразу-галлюцинацию.
+
+    Сравнение по нормализованным словам подряд, регистр и знаки не
+    важны. Хвост после фразы (ник автора субтитров) тоже снимается, но
+    только если он идёт сразу за ней и не длиннее двух слов: настоящая
+    речь после такой фразы не теряется. Возвращает число снятых слов.
+    """
+    toks = [norm(w.w) for w in words]
+    dropped = 0
+    for ph in phrases:
+        pw = [norm(x) for x in ph.split()]
+        n = len(pw)
+        for i in range(len(words) - n + 1):
+            if toks[i:i + n] != pw:
+                continue
+            end = i + n
+            if ph.startswith("субтитры") or ph.startswith("редактор"):
+                end = min(end + 2, len(words))
+            for j in range(i, end):
+                if not words[j].drop:
+                    words[j].drop, words[j].why = True, "галлюцинация (фраза)"
+                    dropped += 1
+    return dropped
+
+
 def chunk_text(words) -> str:
     """Текст куска; если внутри есть неуверенное слово - с пометкой [!]."""
     text = " ".join(x.w for x in words)
@@ -1086,6 +1124,9 @@ def run_multicam(args) -> int:
         return 1
 
     print("3/5 Мусор, паузы, дележка перекрытий...")
+    n_phr = drop_known_hallucinations(words_g) + drop_known_hallucinations(words_h)
+    if n_phr:
+        print(f"  Снято слов из фраз-галлюцинаций: {n_phr}.")
     n_low, n_hopeless = mark_unsure(
         words_g + words_h, args.min_prob,
         float(settings.get("interview.hopeless_prob", 0.05)))
@@ -1295,6 +1336,7 @@ def main(argv=None) -> int:
         return 1
 
     print("3/5 Мусор и паузы...")
+    drop_known_hallucinations(words)
     mark_unsure(words, args.min_prob,
                 float(settings.get("interview.hopeless_prob", 0.05)))
     auto_drop, need_cover, manual = mark_trash(words)

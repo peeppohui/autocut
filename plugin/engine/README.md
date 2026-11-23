@@ -24,6 +24,7 @@
 | `export/xml.py` | FCP7 XML для Premiere |
 | `export/render.py` | MP4 через ffmpeg |
 | `doctor.py` | проверка Python, ffmpeg, моделей и места на диске |
+| `compare.py` | сверка `plan.csv` с эталонной секвенцией из `.prproj` (`python -m engine.compare plan.csv эталон.prproj Дайджест`) |
 
 ## Правило
 
